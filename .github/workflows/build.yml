@@ -12,7 +12,7 @@ jobs:
                 cmake -B build -S . --preset=vs2022-windows -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake;
                 cmake --build build --config Release
             - name: 'Upload Artifact'
-              uses: actions/upload-artifact@v3
+              uses: actions/upload-artifact@v4
               with:
                 name: Release
                 path: build/Release
