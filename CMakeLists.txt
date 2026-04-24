@@ -86,9 +86,17 @@ if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
 		"/Zc:preprocessor" # Enable preprocessor conformance mode
 
 		"/wd4200" # nonstandard extension used : zero-sized array in struct/union
+		"/wd4267" # conversion from size_t, possible loss of data (CommonLibSF)
+		"/wd4324" # structure padded due to alignment specifier (CommonLibSF)
 
 		"$<$<CONFIG:DEBUG>:>"
 		"$<$<CONFIG:RELEASE>:/Zc:inline;/JMC-;/Ob3>"
+	)
+
+	target_compile_definitions(
+		${PROJECT_NAME}
+		PRIVATE
+		_SILENCE_CXX23_ALIGNED_STORAGE_DEPRECATION_WARNING
 	)
 
 	target_link_options(
@@ -102,7 +110,8 @@ endif()
 add_subdirectory(external/CommonLibSF CommonLibSF EXCLUDE_FROM_ALL)
 
 if(MSVC)
-	target_compile_options(CommonLibSF PRIVATE /wd4324)
+	target_compile_options(CommonLibSF PRIVATE /wd4324 /wd4267)
+	target_compile_definitions(CommonLibSF PRIVATE _SILENCE_CXX23_ALIGNED_STORAGE_DEPRECATION_WARNING)
 endif()
 
 find_package(spdlog CONFIG REQUIRED)
