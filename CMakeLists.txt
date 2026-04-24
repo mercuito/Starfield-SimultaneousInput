@@ -101,6 +101,10 @@ endif()
 
 add_subdirectory(external/CommonLibSF CommonLibSF EXCLUDE_FROM_ALL)
 
+if(MSVC)
+	target_compile_options(CommonLibSF PRIVATE /wd4324)
+endif()
+
 find_package(spdlog CONFIG REQUIRED)
 
 target_link_libraries(
