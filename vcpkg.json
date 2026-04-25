@@ -7,17 +7,5 @@
 	"builtin-baseline": "89dc8be6dbcf18482a5a1bf86a2f4615c939b0fb",
 	"dependencies": [
 		"spdlog"
-	],
-	"vcpkg-configuration": {
-		"registries": [
-			{
-				"kind": "git",
-				"baseline": "6e8f58e05235e344c71ecd10c12659342a932f74",
-				"repository": "https://github.com/ThirdEyeSqueegee/vcpkg-ports",
-				"packages": [
-					"spdlog"
-				]
-			}
-		]
-	}
+	]
 }
