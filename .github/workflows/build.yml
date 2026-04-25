@@ -1,19 +1,58 @@
 name: build
-on: [push]
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
 jobs:
-    run-build:
-        runs-on: windows-latest
-        steps:
-            - uses: actions/checkout@v2
-            - run: git submodule update --init --recursive
-            - run: vcpkg integrate install
-            - name: Build
-              run: |
-                cmake -B build -S . --preset=vs2022-windows -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake;
-                cmake --build build --config Release
-            - name: 'Upload Artifact'
-              uses: actions/upload-artifact@v3
-              with:
-                name: Release
-                path: build/Release
-                retention-days: 30
+  build-windows:
+    name: Windows x64 (MSVC)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      # vcpkg ships with the runner image. We pin via the manifest mode
+      # builtin-baseline already, but we still need VCPKG_ROOT pointed at
+      # the runner's vcpkg checkout for the toolchain file.
+      - name: Configure vcpkg env
+        shell: pwsh
+        run: |
+          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: CMake configure
+        shell: pwsh
+        run: |
+          cmake -B build -S . --preset=vs2022-windows
+
+      - name: CMake build (RelWithDebInfo)
+        shell: pwsh
+        run: |
+          cmake --build build --config RelWithDebInfo --parallel
+
+      # Surface the artifact contents (and the version-resource string we
+      # baked) so a green log makes the build provenance auditable
+      # without downloading the artifact.
+      - name: Show build provenance
+        shell: pwsh
+        run: |
+          Write-Host "git SHA: $(git rev-parse HEAD)"
+          Write-Host "Short:   $(git rev-parse --short=12 HEAD)"
+          Get-ChildItem build/RelWithDebInfo/ | Select-Object Name, Length, LastWriteTime | Format-Table
+          Get-Item build/RelWithDebInfo/SimultaneousInput.dll | Select-Object -ExpandProperty VersionInfo | Format-List
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimultaneousInput-${{ github.sha }}
+          path: |
+            build/RelWithDebInfo/SimultaneousInput.dll
+            build/RelWithDebInfo/SimultaneousInput.pdb
+          if-no-files-found: error
+          retention-days: 30
