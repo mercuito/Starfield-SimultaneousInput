@@ -17,11 +17,15 @@ BEGIN
 	BEGIN
 		BLOCK "040904b0"
 		BEGIN
-			VALUE "FileDescription", "@PROJECT_NAME@"
+			VALUE "CompanyName", "@SIMULTANEOUSINPUT_COMPANY@"
+			VALUE "FileDescription", "@PROJECT_NAME@ (SFSE plugin)"
 			VALUE "FileVersion", "@PROJECT_VERSION@.0"
 			VALUE "InternalName", "@PROJECT_NAME@"
+			VALUE "OriginalFilename", "@PROJECT_NAME@.dll"
 			VALUE "ProductName", "@PROJECT_NAME@"
 			VALUE "ProductVersion", "@PROJECT_VERSION@.0"
+			VALUE "Comments", "git @SIMULTANEOUSINPUT_GIT_SHA@ built @SIMULTANEOUSINPUT_BUILD_DATE@"
+			VALUE "LegalCopyright", "GPL-3.0-or-later. Original work by Parapets / Exit-9B."
 		END
 	END
 	BLOCK "VarFileInfo"

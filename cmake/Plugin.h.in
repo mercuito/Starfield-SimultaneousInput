@@ -14,4 +14,10 @@ namespace Plugin
 	};
 
 	inline constexpr auto NAME = "@PROJECT_NAME@"sv;
+
+	// Build provenance. Embedded at CMake configure time so a deployed DLL
+	// can be traced back to the exact source revision via the startup log
+	// or the Windows file-version resource.
+	inline constexpr auto BUILD_SHA  = "@SIMULTANEOUSINPUT_GIT_SHA@"sv;
+	inline constexpr auto BUILD_DATE = "@SIMULTANEOUSINPUT_BUILD_DATE@"sv;
 }

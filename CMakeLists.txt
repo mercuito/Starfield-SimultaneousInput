@@ -1,14 +1,41 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.30)
 
 project(
 	SimultaneousInput
-	VERSION 1.0.3
+	VERSION 1.1.0
 	LANGUAGES CXX
 )
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Generate a debug PDB even for Release: SFSE plugin crashes on a user's
+# machine come back as minidumps that need symbol resolution. The cost is
+# disk space; the benefit is "we can actually diagnose what failed".
+set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "ProgramDatabase")
+
+# === Build provenance: git SHA + build date embedded in DLL ===
+# Captured at configure time. Re-run CMake configure to refresh after a
+# new commit (CI does this on every push, so deployed artifacts always
+# match HEAD). Falls back to "unknown" if git is missing rather than
+# failing the build, so out-of-tree archives still build.
+find_package(Git QUIET)
+if(Git_FOUND)
+	execute_process(
+		COMMAND "${GIT_EXECUTABLE}" rev-parse --short=12 HEAD
+		WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+		OUTPUT_VARIABLE SIMULTANEOUSINPUT_GIT_SHA
+		OUTPUT_STRIP_TRAILING_WHITESPACE
+		ERROR_QUIET
+	)
+endif()
+if(NOT SIMULTANEOUSINPUT_GIT_SHA)
+	set(SIMULTANEOUSINPUT_GIT_SHA "unknown")
+endif()
+string(TIMESTAMP SIMULTANEOUSINPUT_BUILD_DATE "%Y-%m-%dT%H:%M:%SZ" UTC)
+set(SIMULTANEOUSINPUT_COMPANY "Parapets / Exit-9B (fork: gitlostinit)")
 
 cmake_host_system_information(
 	RESULT Starfield_PATH
@@ -75,20 +102,32 @@ target_include_directories(
 )
 
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
+	# Plugin code is held to /WX. CommonLibSF (added below) is allowed to emit
+	# warnings without failing the build via /external:W0.
 	target_compile_options(
 		${PROJECT_NAME}
 		PRIVATE
-		"/sdl" # Enable Additional Security Checks
-		"/utf-8" # Set Source and Executable character sets to UTF-8
-		"/Zi" # Debug Information Format
+		"/sdl" # additional security checks
+		"/utf-8"
+		"/Zi"
 
-		"/permissive-" # Standards conformance
-		"/Zc:preprocessor" # Enable preprocessor conformance mode
+		"/permissive-"
+		"/Zc:preprocessor"
 
-		"/wd4200" # nonstandard extension used : zero-sized array in struct/union
+		"/W4"
+		"/WX"
+
+		# /external:* lets us scope warnings: external angle-bracket includes
+		# (CommonLibSF, spdlog) compile under W0; our own quote includes get W4.
+		"/experimental:external"
+		"/external:anglebrackets"
+		"/external:W0"
+
+		"/wd4200" # nonstandard extension used: zero-sized array in struct/union (used in SFSE/CommonLibSF headers)
 
 		"$<$<CONFIG:DEBUG>:>"
 		"$<$<CONFIG:RELEASE>:/Zc:inline;/JMC-;/Ob3>"
+		"$<$<CONFIG:RELWITHDEBINFO>:/Zc:inline;/JMC-;/Ob3>"
 	)
 
 	target_link_options(
@@ -96,10 +135,21 @@ if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
 		PRIVATE
 		"$<$<CONFIG:DEBUG>:/INCREMENTAL;/OPT:NOREF;/OPT:NOICF>"
 		"$<$<CONFIG:RELEASE>:/INCREMENTAL:NO;/OPT:REF;/OPT:ICF;/DEBUG:FULL>"
+		"$<$<CONFIG:RELWITHDEBINFO>:/INCREMENTAL:NO;/OPT:REF;/OPT:ICF;/DEBUG:FULL>"
 	)
 endif()
 
 add_subdirectory(external/CommonLibSF CommonLibSF EXCLUDE_FROM_ALL)
+
+# Mark CommonLibSF's PUBLIC include as SYSTEM so MSVC's /external:W0 takes effect.
+# Without this, the lib's headers would be quote-included via target_link_libraries
+# and inherit /W4 /WX, which fails the build on warnings inside vendored code.
+get_target_property(_clibsf_includes CommonLibSF INTERFACE_INCLUDE_DIRECTORIES)
+if(_clibsf_includes)
+	set_target_properties(CommonLibSF PROPERTIES
+		INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_clibsf_includes}"
+	)
+endif()
 
 find_package(spdlog CONFIG REQUIRED)
 
