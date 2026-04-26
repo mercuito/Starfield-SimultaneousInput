@@ -139,22 +139,23 @@ if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
 	)
 endif()
 
-add_subdirectory(external/CommonLibSF CommonLibSF EXCLUDE_FROM_ALL)
-
-# Mark CommonLibSF's PUBLIC include as SYSTEM so MSVC's /external:W0 takes effect.
-# Without this, the lib's headers would be quote-included via target_link_libraries
-# and inherit /W4 /WX, which fails the build on warnings inside vendored code.
-get_target_property(_clibsf_includes CommonLibSF INTERFACE_INCLUDE_DIRECTORIES)
-if(_clibsf_includes)
-	set_target_properties(CommonLibSF PROPERTIES
-		INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_clibsf_includes}"
-	)
-endif()
-
-find_package(spdlog CONFIG REQUIRED)
+# === libxse/CommonLibSF (+ libxse/commonlib-shared) ===
+#
+# The submodule at external/CommonLibSF is libxse/CommonLibSF, which is
+# XMake-based and ships no top-level CMakeLists.txt. cmake/CommonLibSF.cmake
+# hand-rolls equivalent CMake static-lib targets for both
+# libxse/CommonLibSF and its nested libxse/commonlib-shared submodule.
+#
+# We adopted libxse to get Address Library DB format-5 parsing
+# (REL::IDDatabase HEADER_V5 in commonlib-shared/src/REL/IDDB.cpp). The
+# previously vendored Starfield-Reverse-Engineering/CommonLibSF only
+# parsed format 2 and crashed on Starfield 1.15.x's format-5 AL DBs with:
+#   [critical] Unsupported address library format: 5
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CommonLibSF.cmake)
 
 target_link_libraries(
 	${PROJECT_NAME}
+	PRIVATE
 	CommonLibSF::CommonLibSF
 	spdlog::spdlog
 )

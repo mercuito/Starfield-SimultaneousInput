@@ -87,11 +87,10 @@ namespace RE
 			constexpr REL::ID SetCursorStyle{ 187051 };
 		}
 
-		// UserEvents::QLook returns the BSFixedString name "Look" used to
-		// identify look events. Read-only; not patched.
-		namespace UserEvents
-		{
-			constexpr REL::ID QLook{ 120233 };
-		}
+		// UserEvents::QLook used to be looked up via AL ID and called to get
+		// the BSFixedString "Look". libxse/CommonLibSF doesn't surface
+		// RE::UserEvents, so we compare event->QUserEvent() directly against
+		// "Look"sv in SFSEPlugin.cpp instead. The function still exists in the
+		// runtime, we just don't need to call it ourselves.
 	}
 }
