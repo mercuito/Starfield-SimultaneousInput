@@ -80,17 +80,16 @@ target_compile_definitions(commonlib-shared PUBLIC
 	NOMINMAX
 	_ITERATOR_DEBUG_LEVEL=0
 )
-# Use spdlog in header-only mode so the wchar + std::format overloads are
-# expanded inline in our TUs and there is no ABI mismatch with vcpkg's
-# precompiled spdlog (which is built without SPDLOG_USE_STD_FORMAT or
-# SPDLOG_WCHAR_TO_UTF8_SUPPORT). libxse code calls spdlog with std::wstring_view
-# and std::format_string so we need both features active.
-target_link_libraries(commonlib-shared PUBLIC spdlog::spdlog_header_only)
+# spdlog: link compiled vcpkg variant (avoids windows.h pulling in via header-
+# only mode and breaking REX::W32::MAX_PATH expansion via macro pollution).
+# Keep SPDLOG_WCHAR_TO_UTF8_SUPPORT public so libxse's REX::LOG.cpp wstring_view
+# log overloads are visible at every TU. SPDLOG_USE_STD_FORMAT is NOT required
+# here: libxse pre-formats via std::vformat before calling spdlog with plain
+# string_view, so we keep spdlog's default fmt backend.
+target_link_libraries(commonlib-shared PUBLIC spdlog::spdlog)
 target_compile_definitions(commonlib-shared PUBLIC
-	SPDLOG_HEADER_ONLY
 	SPDLOG_WCHAR_TO_UTF8_SUPPORT
 	SPDLOG_WCHAR_FILENAMES
-	SPDLOG_USE_STD_FORMAT
 )
 target_link_libraries(commonlib-shared PUBLIC
 	advapi32.lib bcrypt.lib dbghelp.lib dxgi.lib ole32.lib
