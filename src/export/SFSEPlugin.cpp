@@ -17,7 +17,8 @@
 #include "RE/UserEvents.h"
 
 #include <atomic>
-#include <source_location>
+#include <cstdint>
+#include <cstring>
 
 using namespace std::string_view_literals;
 
@@ -25,8 +26,6 @@ using namespace std::string_view_literals;
 
 namespace
 {
-	// Counted hooks installed; surfaced in startup log so a runtime mismatch
-	// is debuggable from SimultaneousInput.log alone.
 	std::atomic<unsigned> g_hooksInstalled{ 0 };
 	std::atomic<unsigned> g_hooksSkipped{ 0 };
 }
@@ -37,23 +36,12 @@ extern "C" DLLEXPORT constexpr auto SFSEPlugin_Version = []()
 
 	v.PluginVersion(Plugin::VERSION);
 	v.PluginName(Plugin::NAME);
-	// Original author. Maintained fork credit lives in the README and version resource.
 	v.AuthorName("Parapets");
 
-	// libxse's UsesAddressLibrary already sets bit 1<<2 (Address Library v2),
-	// which SFSE 0.2.17+ requires. Address Library DB format 5 (Starfield 1.15+)
-	// is parsed by libxse's IDDB::load_v5; format 2 binaries are also supported.
+	// libxse's UsesAddressLibrary sets bit 1<<2 (Address Library v2),
+	// the only flag SFSE 0.2.17+ honors. Format 5 AL DB parsed by libxse IDDB.
 	v.UsesAddressLibrary(true);
-
-	// We patch engine struct layouts (vtable slot 1, BSPCGamepadDevice +0x2A0,
-	// LookHandler::Func10 +0xE, etc.). Bit 1<<3 = "compatible with runtime
-	// 1.14.70+ struct layout" per SFSE 0.2.17+.
 	v.IsLayoutDependent(true);
-
-	// Empty compatibleVersions[] (zero-terminated) means "any runtime that
-	// satisfies the address/layout flags above". Future Steam patches do not
-	// auto-disable the plugin; if a future runtime breaks layout SFSE will
-	// reject via the layout bit instead.
 	return v;
 }();
 
@@ -67,7 +55,6 @@ namespace RE
 	}
 }
 
-// Original engine predicate: returns true when the active input device is the gamepad.
 bool IsUsingGamepad(RE::BSInputDeviceManager* a_inputDeviceManager)
 {
 	using func_t = decltype(IsUsingGamepad);
@@ -75,20 +62,13 @@ bool IsUsingGamepad(RE::BSInputDeviceManager* a_inputDeviceManager)
 	return func(a_inputDeviceManager);
 }
 
-// Latched state set by the LookHandler vtable shim below. True when the most
-// recent QLook event came from a thumbstick; false when it came from MouseMove.
-// This is the core of the mod: the engine treats look input as a single-source
-// stream, but we split it on event type so mouse and gamepad coexist.
 static bool UsingThumbstickLook = false;
 
-// Drop-in replacement for IsUsingGamepad in look-related call sites.
 bool IsUsingThumbstickLook(RE::BSInputDeviceManager*)
 {
 	return UsingThumbstickLook;
 }
 
-// For cursor visibility/style hooks: cursor follows gamepad rules only when
-// thumbstick-look mode is active AND gamepad is the currently-held device.
 bool IsGamepadCursor(RE::BSInputDeviceManager* a_inputDeviceManager)
 {
 	return UsingThumbstickLook && IsUsingGamepad(a_inputDeviceManager);
@@ -96,38 +76,100 @@ bool IsGamepadCursor(RE::BSInputDeviceManager* a_inputDeviceManager)
 
 namespace
 {
-	// Wraps a single trampoline call-site replacement so a single broken AL ID
-	// or pattern mismatch logs and skips that hook, instead of crashing the
-	// whole plugin load. Original upstream used REL::Pattern<...>().match_or_fail()
-	// which terminates the host. With granular logging we still get a clear
-	// diagnostic in the log file but other hooks continue to install.
-	template <std::size_t N, class F>
-	bool TryWriteCall(
-		const REL::ID&   a_id,
-		std::ptrdiff_t   a_offset,
-		F                a_dst,
-		std::string_view a_label)
+	// === Dynamic call-site discovery ===
+	// The original upstream plugin patched hard-coded byte offsets within each
+	// hooked function (e.g., LookHandler::Func10 +0xE). When Bethesda recompiles
+	// the engine those offsets shift. Rather than relying on fixed offsets we
+	// scan the function body looking for an `E8 RR RR RR RR` call instruction
+	// whose 4-byte rel32 displacement resolves to the address we want to
+	// replace. This survives compiler reorderings and instruction shifts as
+	// long as the call is still in the function.
+	//
+	// MAX_SCAN bounds how far we scan. 0x800 (2 KB) is far larger than any of
+	// the hooked functions need but bounds the worst case so we do not run off
+	// into adjacent code.
+	constexpr std::ptrdiff_t MAX_SCAN = 0x800;
+
+	// Find the byte offset of the first `E8` call in the function whose target
+	// matches a_callTarget, scanning up to MAX_SCAN bytes. Returns -1 on miss.
+	std::ptrdiff_t FindCallOffset(const std::uintptr_t a_funcStart, const std::uintptr_t a_callTarget)
+	{
+		const auto* const bytes = reinterpret_cast<const std::uint8_t*>(a_funcStart);
+		for (std::ptrdiff_t i = 0; i < MAX_SCAN; ++i) {
+			if (bytes[i] != 0xE8) continue;
+			std::int32_t rel32{};
+			std::memcpy(&rel32, bytes + i + 1, sizeof(rel32));
+			const auto target = static_cast<std::uintptr_t>(
+				static_cast<std::int64_t>(a_funcStart + i + 5) + rel32);
+			if (target == a_callTarget) {
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	// Replace the first E8 call to a_replaceTarget inside a_funcId's body with
+	// a call to a_newTarget via the trampoline. Logs and skips on miss.
+	template <class F>
+	void TryReplaceCall(
+		const REL::ID&    a_funcId,
+		std::uintptr_t    a_replaceTarget,
+		F                 a_newTarget,
+		std::string_view  a_label)
 	{
 		try {
-			REL::Relocation<std::uintptr_t> hook(a_id, a_offset);
-			if (!REL::Pattern<"E8">().match(hook.address())) {
+			const auto funcStart = a_funcId.address();
+			const auto offset = FindCallOffset(funcStart, a_replaceTarget);
+			if (offset < 0) {
 				REX::WARN(
-					"hook '{}' skipped: AL id {} +{:#x} did not start with E8 (call). "
-					"function may have been refactored on this runtime.",
-					a_label,
-					a_id.id(),
-					a_offset);
+					"hook '{}' skipped: no E8 call to target {:#x} found in first {} "
+					"bytes of AL id {} (function may have been refactored).",
+					a_label, a_replaceTarget, MAX_SCAN, a_funcId.id());
 				++g_hooksSkipped;
-				return false;
+				return;
 			}
-			REL::GetTrampoline().write_call<N>(hook.address(), a_dst);
-			REX::INFO("hook '{}' installed at {:#x}", a_label, hook.address());
+			const auto callAddr = funcStart + offset;
+			REL::GetTrampoline().write_call<5>(callAddr, a_newTarget);
+			REX::INFO(
+				"hook '{}' installed: AL id {} +{:#x} (rel call to {:#x})",
+				a_label, a_funcId.id(), offset, a_replaceTarget);
 			++g_hooksInstalled;
-			return true;
 		} catch (const std::exception& ex) {
 			REX::ERROR("hook '{}' failed: {}", a_label, ex.what());
 			++g_hooksSkipped;
-			return false;
+		}
+	}
+
+	// Scan a function body for a fixed byte sequence and NOP it. Used for the
+	// BSPCGamepadDevice::Poll device-claim store: we look for `C6 43 08 01`
+	// (mov byte ptr [rbx+8], 1) anywhere in the function and overwrite with
+	// 4 NOPs.
+	template <std::size_t N>
+	void TryNopBytePattern(
+		const REL::ID&                a_funcId,
+		const std::uint8_t            (&a_pattern)[N],
+		std::string_view              a_label)
+	{
+		try {
+			const auto funcStart = a_funcId.address();
+			const auto* const bytes = reinterpret_cast<const std::uint8_t*>(funcStart);
+			for (std::ptrdiff_t i = 0; i + static_cast<std::ptrdiff_t>(N) <= MAX_SCAN; ++i) {
+				if (std::memcmp(bytes + i, a_pattern, N) == 0) {
+					REL::WriteSafeFill(funcStart + i, REL::NOP, N);
+					REX::INFO(
+						"byte patch installed: '{}' AL id {} +{:#x} (NOPed {} bytes)",
+						a_label, a_funcId.id(), i, N);
+					++g_hooksInstalled;
+					return;
+				}
+			}
+			REX::WARN(
+				"byte patch skipped: '{}' pattern not found in first {} bytes of AL id {}",
+				a_label, MAX_SCAN, a_funcId.id());
+			++g_hooksSkipped;
+		} catch (const std::exception& ex) {
+			REX::ERROR("byte patch '{}' failed: {}", a_label, ex.what());
+			++g_hooksSkipped;
 		}
 	}
 
@@ -151,9 +193,6 @@ namespace
 
 extern "C" DLLEXPORT bool __cdecl SFSEPlugin_Load(const SFSE::LoadInterface* a_sfse)
 {
-	// libxse's SFSE::Init handles logger setup (REX::INFO/WARN/ERROR backed by
-	// spdlog) and trampoline allocation in one call. trampolineSize=28 covers
-	// 7 trampoline call replacements at 5 bytes each (with reuse).
 	SFSE::Init(a_sfse, SFSE::InitInfo{
 		.log = true,
 		.logName = "SimultaneousInput",
@@ -166,8 +205,7 @@ extern "C" DLLEXPORT bool __cdecl SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	// === Vtable shim: split look input by event type ===
 	// LookHandler vtable slot 1 is the per-event handler. We replace it with a
 	// closure that latches UsingThumbstickLook based on event type, and only
-	// returns true when the event is actually a look event. Without this the
-	// engine collapses mouse + gamepad into a single "current device" channel.
+	// returns true when the event is actually a look event.
 	try {
 		REL::Relocation<std::uintptr_t> vtbl(RE::Offset::PlayerControls::LookHandler::Vtbl);
 		vtbl.write_vfunc(
@@ -193,59 +231,105 @@ extern "C" DLLEXPORT bool __cdecl SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 		++g_hooksSkipped;
 	}
 
-	// === Direct byte patch: stop left-stick from claiming the device ===
-	// Inside BSPCGamepadDevice::Poll at +0x2A0 the engine writes 1 to a
-	// byte indicating "left stick moved -> active device is gamepad". We NOP
-	// the 4-byte store so simply moving the stick does not kick the cursor.
-	// Pattern: C6 43 08 01  (mov byte ptr [rbx+8], 1)
+	// === Resolve the predicates' addresses once for call-site comparison. ===
+	std::uintptr_t isUsingGamepadAddr = 0;
 	try {
-		REL::Relocation<std::uintptr_t> hook(RE::Offset::BSPCGamepadDevice::Poll, 0x2A0);
-		if (REL::Pattern<"C6 43 08 01">().match(hook.address())) {
-			REL::WriteSafeFill(hook.address(), REL::NOP, 0x4);
-			REX::INFO("byte patch installed: BSPCGamepadDevice::Poll +0x2A0");
-			++g_hooksInstalled;
-		} else {
-			REX::WARN(
-				"byte patch skipped: BSPCGamepadDevice::Poll +0x2A0 pattern mismatch. "
-				"left thumbstick will still device-switch on this runtime.");
-			++g_hooksSkipped;
-		}
+		isUsingGamepadAddr = REL::ID(
+			RE::Offset::BSInputDeviceManager::IsUsingGamepad).address();
+		REX::INFO("predicate IsUsingGamepad resolved to {:#x}", isUsingGamepadAddr);
 	} catch (const std::exception& ex) {
-		REX::ERROR("BSPCGamepadDevice::Poll patch failed: {}", ex.what());
-		++g_hooksSkipped;
+		REX::ERROR(
+			"failed to resolve IsUsingGamepad address: {}. all call-replacement "
+			"hooks below will be skipped.", ex.what());
 	}
 
-	// === Look-input call replacements (predicate IsUsingGamepad -> IsUsingThumbstickLook) ===
-	TryWriteCall<5>(
-		RE::Offset::PlayerControls::LookHandler::Func10, 0xE,
-		IsUsingThumbstickLook,
-		"LookHandler::Func10 (2-quadrant slow-movement fix)");
-	TryWriteCall<5>(
-		RE::Offset::PlayerControls::Manager::ProcessLookInput, 0x68,
-		IsUsingThumbstickLook,
-		"PlayerControls::Manager::ProcessLookInput (look sensitivity)");
-	TryWriteCall<5>(
-		RE::Offset::Main::Run_WindowsMessageLoop, 0x39,
-		IsUsingThumbstickLook,
-		"Main::Run_WindowsMessageLoop (cursor window-capture)");
-	TryWriteCall<5>(
-		RE::Offset::ShipHudDataModel::PerformInputProcessing, 0x7AF,
-		IsUsingThumbstickLook,
-		"ShipHudDataModel::PerformInputProcessing+0x7AF (ship reticle)");
-	TryWriteCall<5>(
-		RE::Offset::ShipHudDataModel::PerformInputProcessing, 0x82A,
-		IsUsingThumbstickLook,
-		"ShipHudDataModel::PerformInputProcessing+0x82A (ship reticle)");
+	// === Direct byte patch: stop left-stick from claiming the device ===
+	// Inside BSPCGamepadDevice::Poll the engine writes 1 to a byte indicating
+	// "left stick moved -> active device is gamepad". NOP that mov so simply
+	// moving the stick does not kick the cursor.
+	{
+		const std::uint8_t pattern[4] = { 0xC6, 0x43, 0x08, 0x01 }; // mov byte ptr [rbx+8], 1
+		TryNopBytePattern(
+			RE::Offset::BSPCGamepadDevice::Poll,
+			pattern,
+			"BSPCGamepadDevice::Poll device-claim mov");
+	}
 
-	// === Cursor visibility/style call replacements (-> IsGamepadCursor) ===
-	TryWriteCall<5>(
-		RE::Offset::IMenu::ShowCursor, 0x14,
-		IsGamepadCursor,
-		"IMenu::ShowCursor (menu cursor visibility)");
-	TryWriteCall<5>(
-		RE::Offset::UI::SetCursorStyle, 0x98,
-		IsGamepadCursor,
-		"UI::SetCursorStyle (pointer vs gamepad cursor)");
+	// === Look-input call replacements ===
+	// All these functions originally call IsUsingGamepad(...) once to decide
+	// some look-related branch. We want them to instead call
+	// IsUsingThumbstickLook so the branch keys off the source of the *look*
+	// input rather than the active device.
+	if (isUsingGamepadAddr) {
+		TryReplaceCall(
+			RE::Offset::PlayerControls::LookHandler::Func10,
+			isUsingGamepadAddr, IsUsingThumbstickLook,
+			"LookHandler::Func10 (2-quadrant slow-movement fix)");
+		TryReplaceCall(
+			RE::Offset::PlayerControls::Manager::ProcessLookInput,
+			isUsingGamepadAddr, IsUsingThumbstickLook,
+			"PlayerControls::Manager::ProcessLookInput (look sensitivity)");
+		TryReplaceCall(
+			RE::Offset::Main::Run_WindowsMessageLoop,
+			isUsingGamepadAddr, IsUsingThumbstickLook,
+			"Main::Run_WindowsMessageLoop (cursor window-capture)");
+		// ShipHudDataModel::PerformInputProcessing has two calls to
+		// IsUsingGamepad in the function body. The dynamic finder returns
+		// the first; we still need the second. Patch site 1 first.
+		TryReplaceCall(
+			RE::Offset::ShipHudDataModel::PerformInputProcessing,
+			isUsingGamepadAddr, IsUsingThumbstickLook,
+			"ShipHudDataModel::PerformInputProcessing (ship reticle, first call)");
+		// For the second call site, we need a "find Nth" variant. For now,
+		// scan past the first match and try to find a second. Keep this
+		// inline so we don't add another helper function.
+		try {
+			const auto funcStart = REL::ID(
+				RE::Offset::ShipHudDataModel::PerformInputProcessing).address();
+			const auto* const b = reinterpret_cast<const std::uint8_t*>(funcStart);
+			std::ptrdiff_t found = -1;
+			int matches = 0;
+			for (std::ptrdiff_t i = 0; i < MAX_SCAN; ++i) {
+				if (b[i] != 0xE8) continue;
+				std::int32_t rel{};
+				std::memcpy(&rel, b + i + 1, sizeof(rel));
+				const auto target = static_cast<std::uintptr_t>(
+					static_cast<std::int64_t>(funcStart + i + 5) + rel);
+				if (target == isUsingGamepadAddr) {
+					if (++matches == 2) { found = i; break; }
+				}
+			}
+			if (found >= 0) {
+				REL::GetTrampoline().write_call<5>(funcStart + found, IsUsingThumbstickLook);
+				REX::INFO(
+					"hook 'ShipHudDataModel::PerformInputProcessing (ship reticle, second call)' "
+					"installed at +{:#x}", found);
+				++g_hooksInstalled;
+			} else {
+				REX::WARN(
+					"hook 'ShipHudDataModel::PerformInputProcessing (second call)' skipped: "
+					"only {} call to IsUsingGamepad found in function (expected at least 2).",
+					matches);
+				++g_hooksSkipped;
+			}
+		} catch (const std::exception& ex) {
+			REX::ERROR("ShipHudDataModel second-call hook failed: {}", ex.what());
+			++g_hooksSkipped;
+		}
+
+		// === Cursor visibility/style call replacements ===
+		// IMenu::ShowCursor and UI::SetCursorStyle each call IsUsingGamepad to
+		// pick gamepad vs mouse cursor handling. We redirect to IsGamepadCursor
+		// (a tighter predicate that also requires UsingThumbstickLook).
+		TryReplaceCall(
+			RE::Offset::IMenu::ShowCursor,
+			isUsingGamepadAddr, IsGamepadCursor,
+			"IMenu::ShowCursor (menu cursor visibility)");
+		TryReplaceCall(
+			RE::Offset::UI::SetCursorStyle,
+			isUsingGamepadAddr, IsGamepadCursor,
+			"UI::SetCursorStyle (pointer vs gamepad cursor)");
+	}
 
 	const auto installed = g_hooksInstalled.load();
 	const auto skipped = g_hooksSkipped.load();
