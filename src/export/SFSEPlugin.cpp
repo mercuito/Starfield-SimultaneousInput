@@ -82,7 +82,15 @@ extern "C" DLLEXPORT constexpr auto SFSEPlugin_Version = []()
 
 	// We resolve all engine functions through the Address Library at runtime,
 	// so we want SFSE to grant load on any runtime the AL DB covers.
+	// CommonLibSF's UsesAddressLibrary() only sets bit 1<<1 (AL v1). SFSE
+	// 0.2.17+ requires bit 1<<2 (AL v2) for plugin loads to be accepted on
+	// Starfield 1.10.31+ runtimes (per sfse_whatsnew.txt). Validated on
+	// Starfield 1.16.236 + SFSE 0.2.19: without the v2 bit SFSE silently
+	// hangs the in-process LoadLibrary on the plugin and never logs the
+	// rejection; with the v2 bit set SFSE writes "loaded correctly". We set
+	// both bits so the plugin works on any SFSE that honors either flag.
 	v.UsesAddressLibrary(true);
+	v.addressIndependence |= (1u << 2);
 
 	// We touch engine struct layouts (vtable slot 1, BSPCGamepadDevice +0x2A0,
 	// LookHandler::Func10 +0xE, etc.). With the new CommonLibSF this sets bit 1<<3
