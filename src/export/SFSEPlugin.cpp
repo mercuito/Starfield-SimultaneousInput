@@ -135,16 +135,24 @@ namespace
 			REL::Relocation<std::uintptr_t> hook(a_id, a_offset);
 			if (!REL::Pattern<"E8">().match(hook.address())) {
 				REX::WARN(
-					"hook '{}' skipped: AL id {} +{:#x} did not start with E8 (call). "
-					"function may have been refactored on this runtime.",
+					"hook '{}' skipped: AL id {} (rva {:#x}) +{:#x} did not start with "
+					"E8 (call). function was refactored on this runtime; see MAINTAINING.md "
+					"section 7 for the per-hook 1.16.236 derivation status.",
 					a_label,
+					a_id.id(),
 					a_id.offset(),
 					a_offset);
 				++g_hooksSkipped;
 				return false;
 			}
 			REL::GetTrampoline().write_call<N>(hook.address(), a_dst);
-			REX::INFO("hook '{}' installed at {:#x}", a_label, hook.address());
+			REX::INFO(
+				"hook '{}' installed: AL id {} (rva {:#x}) +{:#x} -> {:#x}",
+				a_label,
+				a_id.id(),
+				a_id.offset(),
+				a_offset,
+				hook.address());
 			++g_hooksInstalled;
 			return true;
 		} catch (const std::exception& ex) {
@@ -259,8 +267,11 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 			++g_hooksInstalled;
 		} else {
 			REX::WARN(
-				"byte patch skipped: BSPCGamepadDevice::Poll +0x2A0 pattern mismatch. "
-				"left thumbstick will still device-switch on this runtime.");
+				"byte patch skipped: BSPCGamepadDevice::Poll AL id {} (rva {:#x}) +0x2A0 "
+				"pattern 'C6 43 08 01' not found on this runtime; Poll body refactored. "
+				"left thumbstick will still device-switch. see MAINTAINING.md section 7.",
+				RE::Offset::BSPCGamepadDevice::Poll.id(),
+				RE::Offset::BSPCGamepadDevice::Poll.offset());
 			++g_hooksSkipped;
 		}
 	} catch (const std::exception& ex) {

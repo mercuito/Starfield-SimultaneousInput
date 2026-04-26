@@ -97,3 +97,50 @@ The workflow runs on every push, so the normal flow is just `git push`.
 For a manual rerun without a code change, use `workflow_dispatch` from
 the Actions tab on GitHub. The artifact is named
 `SimultaneousInput-<sha>` and contains the DLL + PDB.
+
+## 6. Derivation tooling
+
+`tools/al_db_parser.py` is a self-contained Python module that parses the
+Address Library v5 binary (the same `versionlib-*.bin` SFSE loads at runtime)
+and the Starfield PE. It supports forward and reverse RVA lookup, function
+end heuristics anchored on neighboring AL IDs, simple thunk following, and
+E8 call enumeration. Run it with `--probe` against a local copy of the runtime
+to dump per-hook diagnostics:
+
+```
+pip install --break-system-packages lief
+python3 tools/al_db_parser.py \
+    --db /path/to/versionlib-1-16-236-0.bin \
+    --exe /path/to/Starfield.exe \
+    --probe
+```
+
+`tools/derive_function_ids.ps1` is the older PowerShell variant. Both target
+format-5 ALDBs; v0/v1/v2 (legacy AE-style) are out of scope.
+
+## 7. Status against Starfield 1.16.236
+
+A full re-derivation pass against 1.16.236 produced the following finding:
+of the 9 hooks, only the LookHandler vtable shim is cleanly portable.
+
+| Hook | AL ID | 1.16.236 status |
+|---|---|---|
+| LookHandler vtable shim (slot 1)         | 433589 | works (vtable layout preserved, ID re-anchored from libxse `IDs_VTABLE.h`) |
+| BSPCGamepadDevice::Poll byte patch +0x2A0 | 179249 | `C6 43 08 01` pattern absent; Poll body fully refactored |
+| LookHandler::Func10 E8 +0x0E              | 129152 | function exists (0x250 bytes) but no E8 at +0x0E; 13 E8 sites within body, none with predicate-shaped target |
+| Manager::ProcessLookInput E8 +0x68        | 129407 | thunk; real entry is alid 129441; nearest E8 at +0x6B targets a 0x1B0-byte vector function, not a predicate |
+| Main::Run_WindowsMessageLoop E8 +0x39     | 149028 | function exists (0x250 bytes); 27 E8 sites; no clear predicate analog |
+| ShipHudDataModel::PerformInputProcessing E8 +0x7AF / +0x82A | 137087 | function shrank to 0x50 bytes; uses `ff 50 40` indirect vfunc dispatch instead of E8 calls |
+| IMenu::ShowCursor E8 +0x14                | 187256 | function exists (0x80 bytes); single E8 at +0x1E targets a struct-cleanup function, not IsGamepadCursor |
+| UI::SetCursorStyle E8 +0x98               | 187051 | function exists (0x20 bytes); single E8 at +0x15 targets a 0x2a8-sized notifier, not a style chooser |
+| BSInputDeviceManager::IsUsingGamepad      | 178879 | now resolves to a spdlog-style logging stub, not a callable predicate |
+
+The 8 call-replacement hooks fail safely (the runtime probe checks for `E8`
+at the documented offset before writing). `SimultaneousInput.log` will show
+"hook ... skipped" for each.
+
+Restoring the call-replacement hooks for 1.16.236 requires a Ghidra-grade
+pass: identify the analogous code paths (Bethesda likely inlined or moved
+the device-active check), then either choose a new patch site or restructure
+the mod's hook strategy. That work is out of scope for a per-patch
+maintenance pass and is tracked separately.
