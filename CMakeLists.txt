@@ -80,11 +80,14 @@ target_compile_definitions(commonlib-shared PUBLIC
 	NOMINMAX
 	_ITERATOR_DEBUG_LEVEL=0
 )
-target_link_libraries(commonlib-shared PUBLIC spdlog::spdlog)
-# Match libxse's xmake build: spdlog with wchar overloads + std::format backend.
-# These defines must be set at every TU that includes spdlog.h, which means
-# PUBLIC so the plugin's TUs see them too.
+# Use spdlog in header-only mode so the wchar + std::format overloads are
+# expanded inline in our TUs and there is no ABI mismatch with vcpkg's
+# precompiled spdlog (which is built without SPDLOG_USE_STD_FORMAT or
+# SPDLOG_WCHAR_TO_UTF8_SUPPORT). libxse code calls spdlog with std::wstring_view
+# and std::format_string so we need both features active.
+target_link_libraries(commonlib-shared PUBLIC spdlog::spdlog_header_only)
 target_compile_definitions(commonlib-shared PUBLIC
+	SPDLOG_HEADER_ONLY
 	SPDLOG_WCHAR_TO_UTF8_SUPPORT
 	SPDLOG_WCHAR_FILENAMES
 	SPDLOG_USE_STD_FORMAT
