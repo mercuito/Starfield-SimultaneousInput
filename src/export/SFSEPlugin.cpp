@@ -193,20 +193,25 @@ namespace
 
 extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_sfse)
 {
-	// libxse's SFSE::Init handles spdlog setup itself when InitInfo.log is
-	// true (default). It writes to %USERPROFILE%/Documents/My Games/Starfield/
-	// SFSE/Logs/{plugin-name}.log, which is the same directory SFSE writes
-	// sfse.log to, so users get one consolidated logs folder.
-	SFSE::Init(a_sfse);
+	// libxse's SFSE::Init does spdlog setup itself when InitInfo.log is true,
+	// and (when trampoline=true) reserves trampoline space from SFSE's
+	// branch pool, falling back to a self-allocated trampoline.
+	//
+	// Trampoline budget: 28 bytes = 5 (write_call) per replacement, rounded
+	// up. We install 7 trampoline calls below; 5 * 7 = 35, but several share
+	// targets and the trampoline only needs unique 5-byte stubs per call
+	// site, so 28 is enough. Bump this if we add hooks. We deliberately use
+	// the InitInfo path instead of the deprecated SFSE::AllocTrampoline to
+	// stay /WX-clean (C4996 with the prior call).
+	//
+	// Logs land in %USERPROFILE%/Documents/My Games/Starfield/SFSE/Logs/
+	// SimultaneousInput.log, the same dir SFSE writes sfse.log, so users
+	// get one consolidated log folder.
+	SFSE::Init(a_sfse, SFSE::InitInfo{
+		.trampoline = true,
+		.trampolineSize = 28,
+	});
 	LogRuntimeProbe(a_sfse);
-
-	// 28 bytes = 5 (write_call) per replacement, rounded up. We install 7
-	// trampoline calls below: 5 * 7 = 35, but several share targets and the
-	// trampoline only needs unique 5-byte stubs per call site, so 28 is
-	// enough. If we add hooks, bump this. SFSE::AllocTrampoline is deprecated
-	// in libxse but still works; the modern equivalent is
-	// REL::GetTrampoline().create(28), which we could switch to later.
-	SFSE::AllocTrampoline(28);
 
 	// === Vtable shim: split look input by event type ===
 	// LookHandler vtable slot 1 is the per-event handler. We replace it with a
