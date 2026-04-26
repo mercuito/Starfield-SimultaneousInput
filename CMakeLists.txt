@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.30)
 
 project(
 	SimultaneousInput
-	VERSION 1.1.0
+	VERSION 1.2.0
 	LANGUAGES CXX
 )
 
@@ -11,16 +11,11 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Generate a debug PDB even for Release: SFSE plugin crashes on a user's
-# machine come back as minidumps that need symbol resolution. The cost is
-# disk space; the benefit is "we can actually diagnose what failed".
+# Generate a debug PDB even for Release. SFSE plugin crashes on a user's
+# machine come back as minidumps that need symbol resolution.
 set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "ProgramDatabase")
 
 # === Build provenance: git SHA + build date embedded in DLL ===
-# Captured at configure time. Re-run CMake configure to refresh after a
-# new commit (CI does this on every push, so deployed artifacts always
-# match HEAD). Falls back to "unknown" if git is missing rather than
-# failing the build, so out-of-tree archives still build.
 find_package(Git QUIET)
 if(Git_FOUND)
 	execute_process(
@@ -46,26 +41,93 @@ cmake_host_system_information(
 set(Starfield_PATH ${Starfield_PATH} CACHE PATH "Installed path of Starfield.")
 set(GAME_DIR ${Starfield_PATH})
 
+# ============================================================================
+# libxse/CommonLibSF + libxse/commonlib-shared
+# ----------------------------------------------------------------------------
+# These submodules ship only an xmake.lua. We build them as static libs via
+# CMake here so the rest of the project can keep using CMake + vcpkg. The
+# layout matches what xmake does: commonlib-shared compiles its src/**.cpp
+# into a static lib and exposes include/, then CommonLibSF compiles its own
+# src/**.cpp + links commonlib-shared, exposing its own include/.
+#
+# Source of truth on dependency graph:
+#   external/CommonLibSF/xmake.lua          (commonlibsf target)
+#   external/CommonLibSF/lib/commonlib-shared/xmake.lua (commonlib-shared target)
+# ============================================================================
+set(CLIBSF_DIR     ${CMAKE_CURRENT_SOURCE_DIR}/external/CommonLibSF)
+set(CLIBSHARED_DIR ${CLIBSF_DIR}/lib/commonlib-shared)
+
+find_package(spdlog CONFIG REQUIRED)
+
+# --- commonlib-shared ---
+file(
+	GLOB_RECURSE COMMONLIB_SHARED_SOURCES
+	CONFIGURE_DEPENDS
+	${CLIBSHARED_DIR}/src/*.cpp
+)
+add_library(commonlib-shared STATIC ${COMMONLIB_SHARED_SOURCES})
+target_include_directories(commonlib-shared SYSTEM PUBLIC ${CLIBSHARED_DIR}/include)
+target_compile_features(commonlib-shared PUBLIC cxx_std_23)
+target_compile_definitions(commonlib-shared PUBLIC
+	WINVER=0x0A00
+	_WIN32_WINNT=0x0A00
+	WIN32_LEAN_AND_MEAN
+	NOMINMAX
+	_ITERATOR_DEBUG_LEVEL=0
+)
+target_link_libraries(commonlib-shared PUBLIC spdlog::spdlog)
+target_link_libraries(commonlib-shared PUBLIC
+	advapi32.lib bcrypt.lib dbghelp.lib dxgi.lib ole32.lib
+	shell32.lib user32.lib version.lib ws2_32.lib
+)
+if(MSVC)
+	target_compile_options(commonlib-shared PUBLIC /bigobj)
+	# Vendored code; do not gate the build on its warnings.
+	target_compile_options(commonlib-shared PRIVATE
+		/wd4005 /wd4068 /wd4200 /wd4201 /wd4244 /wd4267 /wd4324 /wd4458 /wd4505
+	)
+endif()
+
+# --- CommonLibSF ---
+file(
+	GLOB_RECURSE COMMONLIBSF_SOURCES
+	CONFIGURE_DEPENDS
+	${CLIBSF_DIR}/src/*.cpp
+)
+add_library(CommonLibSF STATIC ${COMMONLIBSF_SOURCES})
+target_include_directories(CommonLibSF SYSTEM PUBLIC ${CLIBSF_DIR}/include)
+target_compile_features(CommonLibSF PUBLIC cxx_std_23)
+target_link_libraries(CommonLibSF PUBLIC commonlib-shared)
+target_precompile_headers(CommonLibSF PRIVATE
+	${CLIBSF_DIR}/include/SFSE/Impl/PCH.h
+)
+if(MSVC)
+	target_compile_options(CommonLibSF PUBLIC /bigobj)
+	target_compile_options(CommonLibSF PRIVATE
+		/wd4005 /wd4068 /wd4200 /wd4201 /wd4244 /wd4267 /wd4324 /wd4458 /wd4505
+	)
+endif()
+add_library(CommonLibSF::CommonLibSF ALIAS CommonLibSF)
+
+# ============================================================================
+# Plugin target
+# ============================================================================
 add_library(${PROJECT_NAME} SHARED)
 
 file(
-	GLOB_RECURSE
-	HEADER_FILES
+	GLOB_RECURSE HEADER_FILES
 	LIST_DIRECTORIES false
 	CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
 )
-
 target_sources(${PROJECT_NAME} PRIVATE ${HEADER_FILES})
 
 file(
-	GLOB_RECURSE
-	SOURCE_FILES
+	GLOB_RECURSE SOURCE_FILES
 	LIST_DIRECTORIES false
 	CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
-
 target_sources(${PROJECT_NAME} PRIVATE ${SOURCE_FILES})
 
 target_sources(
@@ -101,30 +163,23 @@ target_include_directories(
 	${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
-	# Plugin code is held to /WX. CommonLibSF (added below) is allowed to emit
-	# warnings without failing the build via /external:W0.
+if(MSVC)
+	# Plugin code held to /WX. Vendored libxse code already has
+	# warnings suppressed via /external:W0 + SYSTEM include.
 	target_compile_options(
 		${PROJECT_NAME}
 		PRIVATE
-		"/sdl" # additional security checks
+		"/sdl"
 		"/utf-8"
 		"/Zi"
-
 		"/permissive-"
 		"/Zc:preprocessor"
-
 		"/W4"
 		"/WX"
-
-		# /external:* lets us scope warnings: external angle-bracket includes
-		# (CommonLibSF, spdlog) compile under W0; our own quote includes get W4.
 		"/experimental:external"
 		"/external:anglebrackets"
 		"/external:W0"
-
-		"/wd4200" # nonstandard extension used: zero-sized array in struct/union (used in SFSE/CommonLibSF headers)
-
+		"/wd4200"
 		"$<$<CONFIG:DEBUG>:>"
 		"$<$<CONFIG:RELEASE>:/Zc:inline;/JMC-;/Ob3>"
 		"$<$<CONFIG:RELWITHDEBINFO>:/Zc:inline;/JMC-;/Ob3>"
@@ -139,24 +194,10 @@ if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
 	)
 endif()
 
-add_subdirectory(external/CommonLibSF CommonLibSF EXCLUDE_FROM_ALL)
-
-# Mark CommonLibSF's PUBLIC include as SYSTEM so MSVC's /external:W0 takes effect.
-# Without this, the lib's headers would be quote-included via target_link_libraries
-# and inherit /W4 /WX, which fails the build on warnings inside vendored code.
-get_target_property(_clibsf_includes CommonLibSF INTERFACE_INCLUDE_DIRECTORIES)
-if(_clibsf_includes)
-	set_target_properties(CommonLibSF PROPERTIES
-		INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_clibsf_includes}"
-	)
-endif()
-
-find_package(spdlog CONFIG REQUIRED)
-
 target_link_libraries(
 	${PROJECT_NAME}
+	PRIVATE
 	CommonLibSF::CommonLibSF
-	spdlog::spdlog
 )
 
 if(CMAKE_GENERATOR MATCHES "Visual Studio")
