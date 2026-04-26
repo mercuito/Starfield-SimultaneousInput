@@ -255,23 +255,40 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	}
 
 	// === Direct byte patch: stop left-stick from claiming the device ===
-	// Inside BSPCGamepadDevice::Poll at +0x2A0 the engine writes 1 to a byte
-	// indicating "left stick moved -> active device is gamepad". We NOP the
-	// 4-byte store so simply moving the stick doesn't kick the cursor.
+	// Inside BSPCGamepadDevice::Poll the engine writes 1 to a byte indicating
+	// "left stick moved -> active device is gamepad". We NOP the 4-byte store
+	// so simply moving the stick doesn't kick the cursor.
 	// Pattern: C6 43 08 01  (mov byte ptr [rbx+8], 1)
+	//
+	// Original Parapets offset was +0x2A0 (Starfield 1.8.86). On 1.16.236 the
+	// byte layout shifted: the same anchor is at +0x51D within the same
+	// function. Rather than hard-code, we scan the function body for the
+	// anchor pattern within a ~0x800-byte window and patch wherever we find
+	// it. This makes the byte patch resilient to future minor refactors.
 	try {
-		REL::Relocation<std::uintptr_t> hook(RE::Offset::BSPCGamepadDevice::Poll, 0x2A0);
-		if (REL::Pattern<"C6 43 08 01">().match(hook.address())) {
+		REL::Relocation<std::uintptr_t> head(RE::Offset::BSPCGamepadDevice::Poll);
+		constexpr std::size_t kScanLimit = 0x800;
+		const std::uint8_t*   p = reinterpret_cast<const std::uint8_t*>(head.address());
+		std::ptrdiff_t        match_off = -1;
+		for (std::size_t i = 0; i + 4 <= kScanLimit; ++i) {
+			if (p[i] == 0xC6 && p[i + 1] == 0x43 && p[i + 2] == 0x08 && p[i + 3] == 0x01) {
+				match_off = static_cast<std::ptrdiff_t>(i);
+				break;
+			}
+		}
+		if (match_off >= 0) {
+			REL::Relocation<std::uintptr_t> hook(RE::Offset::BSPCGamepadDevice::Poll, match_off);
 			hook.write_fill(REL::NOP, 0x4);
-			REX::INFO("byte patch installed: BSPCGamepadDevice::Poll +0x2A0");
+			REX::INFO("byte patch installed: BSPCGamepadDevice::Poll +{:#x}", match_off);
 			++g_hooksInstalled;
 		} else {
 			REX::WARN(
-				"byte patch skipped: BSPCGamepadDevice::Poll AL id {} (rva {:#x}) +0x2A0 "
-				"pattern 'C6 43 08 01' not found on this runtime; Poll body refactored. "
-				"left thumbstick will still device-switch. see MAINTAINING.md section 7.",
+				"byte patch skipped: BSPCGamepadDevice::Poll AL id {} (rva {:#x}) "
+				"anchor 'C6 43 08 01' not found in first {:#x} bytes; function may "
+				"have been refactored further. left thumbstick will still device-switch.",
 				RE::Offset::BSPCGamepadDevice::Poll.id(),
-				RE::Offset::BSPCGamepadDevice::Poll.offset());
+				RE::Offset::BSPCGamepadDevice::Poll.offset(),
+				kScanLimit);
 			++g_hooksSkipped;
 		}
 	} catch (const std::exception& ex) {

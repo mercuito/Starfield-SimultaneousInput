@@ -20,25 +20,50 @@ namespace RE
 		// Predicate: bool IsUsingGamepad(BSInputDeviceManager*).
 		// Used as the call target in the look/cursor patches; we substitute
 		// our own predicates by rewriting those E8 call instructions.
+		//
+		// Was 178879 (Parapets, 1.8.86). In the 1.16.236 AL DB, ID 178879
+		// resolves to a debug log stub at 0x3552490 (a TLS-singleton
+		// accessor + format-and-log path), not the predicate. The
+		// predicate equivalent in 1.16.236 is at RVA 0x28cef30, which has
+		// AL ID 139340 (derived via tools/derive_function_ids.py:
+		// destination shared by 4 of 6 input-related host bodies).
+		// IsUsingGamepad calls in IMenu/UI cursor hooks resolve to a
+		// different RVA (0x002c4b50, AL TBD); Bethesda has split the
+		// predicate across cursor-vs-look subsystems in 1.16.236.
 		namespace BSInputDeviceManager
 		{
-			constexpr REL::ID IsUsingGamepad{ 178879 };
+			constexpr REL::ID IsUsingGamepad{ 139340 };
 		}
 
 		// BSPCGamepadDevice::Poll. We NOP a single mov byte ptr [rbx+8], 1
-		// (4 bytes at +0x2A0) so that left-stick movement no longer flags
-		// the active device as gamepad.
+		// so that left-stick movement no longer flags the active device
+		// as gamepad. Pattern: C6 43 08 01.
+		//
+		// Was 179249 (Parapets, 1.8.86). In the 1.16.236 AL DB, ID 179249
+		// resolves to a 42-byte thunk at 0x356e720 whose body never
+		// contains the C6 43 08 01 anchor, so the byte patch could not
+		// install. The real Poll in 1.16.236 is at vtable[470133][1] =
+		// RVA 0x2302bc0, which is AL ID 124384, with the patch anchor at
+		// offset 0x51d (was 0x2A0). Derived via
+		// tools/derive_function_ids.py with vtable + anchor scan.
 		namespace BSPCGamepadDevice
 		{
-			constexpr REL::ID Poll{ 179249 };
+			constexpr REL::ID Poll{ 124384 };
 		}
 
 		// IMenu::ShowCursor. Call at +0x14 decides whether to draw the
 		// gamepad-style cursor for menus; we redirect it to IsGamepadCursor
 		// so mouse + gamepad held simultaneously still shows the mouse cursor.
+		//
+		// Was 187256 (Parapets, 1.8.86). In the 1.16.236 AL DB, ID 187256
+		// resolves to 0x37d31f0 which is not the actual ShowCursor in
+		// 1.16.236; that function has no E8 at +0x14. The libxse-canonical
+		// IMenu vtable[475515] slot 18 is RVA 0x481e60 = AL ID 42816, which
+		// does have an E8 at +0x14 (calls 0x481d30). Derived via
+		// tools/derive_function_ids.py vtable scan + offset anchor.
 		namespace IMenu
 		{
-			constexpr REL::ID ShowCursor{ 187256 };
+			constexpr REL::ID ShowCursor{ 42816 };
 		}
 
 		// Main::Run_WindowsMessageLoop. Call at +0x39 governs window cursor

@@ -1,0 +1,1474 @@
+{
+  "starfield_version": "1.16.236.0",
+  "image_base_hex": "0x140000000",
+  "results": {
+    "BSPCGamepadDevice::Poll": {
+      "host_al": 179249,
+      "host_rva_hex": "0x356e720",
+      "host_source": "db_parse",
+      "old_offset_hex": "0x2a0",
+      "mechanism": "byte_patch_nop4",
+      "new_offset_candidates_hex": []
+    },
+    "PlayerControls::LookHandler::Func10": {
+      "host_al": 129152,
+      "host_rva_hex": "0x24d3bc0",
+      "host_source": "db_parse",
+      "old_offset_hex": "0xe",
+      "mechanism": "rewrite_call5",
+      "e8_destinations": [
+        {
+          "offset_hex": "0x56",
+          "target_rva_hex": "0x2406810"
+        },
+        {
+          "offset_hex": "0xb5",
+          "target_rva_hex": "0x2409440"
+        },
+        {
+          "offset_hex": "0x11a",
+          "target_rva_hex": "0x2b8150"
+        },
+        {
+          "offset_hex": "0x16c",
+          "target_rva_hex": "0x24da990"
+        },
+        {
+          "offset_hex": "0x196",
+          "target_rva_hex": "0x28cef30"
+        },
+        {
+          "offset_hex": "0x1a4",
+          "target_rva_hex": "0x28cef30"
+        },
+        {
+          "offset_hex": "0x1b7",
+          "target_rva_hex": "0x10c13f24"
+        },
+        {
+          "offset_hex": "0x1c0",
+          "target_rva_hex": "0x28cef10"
+        },
+        {
+          "offset_hex": "0x1c7",
+          "target_rva_hex": "0x-706abd89"
+        },
+        {
+          "offset_hex": "0x1e2",
+          "target_rva_hex": "0x28ceef0"
+        },
+        {
+          "offset_hex": "0x1f9",
+          "target_rva_hex": "0x28cef10"
+        },
+        {
+          "offset_hex": "0x22b",
+          "target_rva_hex": "0x3c9160"
+        },
+        {
+          "offset_hex": "0x236",
+          "target_rva_hex": "0x28cef30"
+        },
+        {
+          "offset_hex": "0x2a4",
+          "target_rva_hex": "0x24d3bc0"
+        },
+        {
+          "offset_hex": "0x2e1",
+          "target_rva_hex": "0x24cf7c0"
+        },
+        {
+          "offset_hex": "0x2fe",
+          "target_rva_hex": "0x24cf6f0"
+        },
+        {
+          "offset_hex": "0x32c",
+          "target_rva_hex": "0x24ca2b0"
+        },
+        {
+          "offset_hex": "0x353",
+          "target_rva_hex": "0x22d05a0"
+        },
+        {
+          "offset_hex": "0x3fd",
+          "target_rva_hex": "0x22d05a0"
+        },
+        {
+          "offset_hex": "0x49d",
+          "target_rva_hex": "0x22d05a0"
+        },
+        {
+          "offset_hex": "0x609",
+          "target_rva_hex": "0x27d9c50"
+        },
+        {
+          "offset_hex": "0x636",
+          "target_rva_hex": "0x2407e50"
+        },
+        {
+          "offset_hex": "0x650",
+          "target_rva_hex": "0x24cf510"
+        },
+        {
+          "offset_hex": "0x74a",
+          "target_rva_hex": "0x28dc4e0"
+        },
+        {
+          "offset_hex": "0x75d",
+          "target_rva_hex": "0x28dc4e0"
+        },
+        {
+          "offset_hex": "0x767",
+          "target_rva_hex": "0x22c9910"
+        },
+        {
+          "offset_hex": "0x789",
+          "target_rva_hex": "0x24cb830"
+        },
+        {
+          "offset_hex": "0x7c7",
+          "target_rva_hex": "0x240c6d0"
+        },
+        {
+          "offset_hex": "0x7f0",
+          "target_rva_hex": "0x2407440"
+        },
+        {
+          "offset_hex": "0x7f5",
+          "target_rva_hex": "0x240c6d0"
+        },
+        {
+          "offset_hex": "0x81e",
+          "target_rva_hex": "0x2407440"
+        },
+        {
+          "offset_hex": "0x823",
+          "target_rva_hex": "0x240c6d0"
+        },
+        {
+          "offset_hex": "0x84c",
+          "target_rva_hex": "0x2407440"
+        },
+        {
+          "offset_hex": "0x851",
+          "target_rva_hex": "0x240c6d0"
+        },
+        {
+          "offset_hex": "0x87a",
+          "target_rva_hex": "0x2407440"
+        },
+        {
+          "offset_hex": "0x87f",
+          "target_rva_hex": "0x240c6d0"
+        },
+        {
+          "offset_hex": "0x8a8",
+          "target_rva_hex": "0x2407440"
+        },
+        {
+          "offset_hex": "0x8ad",
+          "target_rva_hex": "0x240c6d0"
+        },
+        {
+          "offset_hex": "0x8d6",
+          "target_rva_hex": "0x2407440"
+        },
+        {
+          "offset_hex": "0x8f0",
+          "target_rva_hex": "0x27bd0b0"
+        },
+        {
+          "offset_hex": "0x90a",
+          "target_rva_hex": "0x27bd0b0"
+        },
+        {
+          "offset_hex": "0x924",
+          "target_rva_hex": "0x27bd0b0"
+        },
+        {
+          "offset_hex": "0x93e",
+          "target_rva_hex": "0x27bd0b0"
+        },
+        {
+          "offset_hex": "0x943",
+          "target_rva_hex": "0x2520c80"
+        },
+        {
+          "offset_hex": "0x95f",
+          "target_rva_hex": "0x28cfb80"
+        },
+        {
+          "offset_hex": "0x978",
+          "target_rva_hex": "0x2461825"
+        },
+        {
+          "offset_hex": "0x995",
+          "target_rva_hex": "0x28cee40"
+        },
+        {
+          "offset_hex": "0x9db",
+          "target_rva_hex": "0x-1d27765e"
+        },
+        {
+          "offset_hex": "0xacc",
+          "target_rva_hex": "0x6c14839"
+        },
+        {
+          "offset_hex": "0xad5",
+          "target_rva_hex": "0x2b81e0"
+        }
+      ]
+    },
+    "PlayerControls::Manager::ProcessLookInput": {
+      "host_al": 129407,
+      "host_rva_hex": "0x24e6450",
+      "host_source": "log",
+      "old_offset_hex": "0x68",
+      "mechanism": "rewrite_call5",
+      "e8_destinations": [
+        {
+          "offset_hex": "0x59",
+          "target_rva_hex": "0x240b490"
+        },
+        {
+          "offset_hex": "0x8e",
+          "target_rva_hex": "0x24e74c3"
+        },
+        {
+          "offset_hex": "0xa1",
+          "target_rva_hex": "0x36d290"
+        },
+        {
+          "offset_hex": "0xb5",
+          "target_rva_hex": "0x-badb50e"
+        },
+        {
+          "offset_hex": "0xbe",
+          "target_rva_hex": "0x-7a64e3de"
+        },
+        {
+          "offset_hex": "0x102",
+          "target_rva_hex": "0x24ea510"
+        },
+        {
+          "offset_hex": "0x10d",
+          "target_rva_hex": "0x2408aa0"
+        },
+        {
+          "offset_hex": "0x158",
+          "target_rva_hex": "0x495f6072"
+        },
+        {
+          "offset_hex": "0x19f",
+          "target_rva_hex": "0x24e5e60"
+        },
+        {
+          "offset_hex": "0x1a8",
+          "target_rva_hex": "0x40d798e5"
+        },
+        {
+          "offset_hex": "0x1f1",
+          "target_rva_hex": "0x240b490"
+        },
+        {
+          "offset_hex": "0x241",
+          "target_rva_hex": "0x36d290"
+        },
+        {
+          "offset_hex": "0x256",
+          "target_rva_hex": "0x-baf546d"
+        },
+        {
+          "offset_hex": "0x2a8",
+          "target_rva_hex": "0x24dd280"
+        },
+        {
+          "offset_hex": "0x2b3",
+          "target_rva_hex": "0x2408aa0"
+        },
+        {
+          "offset_hex": "0x334",
+          "target_rva_hex": "0x24dd3c0"
+        },
+        {
+          "offset_hex": "0x33f",
+          "target_rva_hex": "0x28cef30"
+        },
+        {
+          "offset_hex": "0x34a",
+          "target_rva_hex": "0x28cef30"
+        },
+        {
+          "offset_hex": "0x355",
+          "target_rva_hex": "0x28cef30"
+        },
+        {
+          "offset_hex": "0x485",
+          "target_rva_hex": "0x2412a30"
+        },
+        {
+          "offset_hex": "0x4c9",
+          "target_rva_hex": "0x2409440"
+        },
+        {
+          "offset_hex": "0x645",
+          "target_rva_hex": "0x2412a30"
+        },
+        {
+          "offset_hex": "0x689",
+          "target_rva_hex": "0x2409440"
+        },
+        {
+          "offset_hex": "0x758",
+          "target_rva_hex": "0x2407000"
+        },
+        {
+          "offset_hex": "0x79a",
+          "target_rva_hex": "0x2409440"
+        },
+        {
+          "offset_hex": "0x7d1",
+          "target_rva_hex": "0x24e57d0"
+        },
+        {
+          "offset_hex": "0x8ab",
+          "target_rva_hex": "0x24e5910"
+        },
+        {
+          "offset_hex": "0x8e6",
+          "target_rva_hex": "0x24097b0"
+        },
+        {
+          "offset_hex": "0x928",
+          "target_rva_hex": "0x2407000"
+        },
+        {
+          "offset_hex": "0x96a",
+          "target_rva_hex": "0x2409440"
+        },
+        {
+          "offset_hex": "0x9a1",
+          "target_rva_hex": "0x24db240"
+        },
+        {
+          "offset_hex": "0xa7b",
+          "target_rva_hex": "0x24e2d30"
+        },
+        {
+          "offset_hex": "0xac0",
+          "target_rva_hex": "0x24097b0"
+        },
+        {
+          "offset_hex": "0xaf8",
+          "target_rva_hex": "0x2407000"
+        },
+        {
+          "offset_hex": "0xb3a",
+          "target_rva_hex": "0x2409440"
+        },
+        {
+          "offset_hex": "0xb71",
+          "target_rva_hex": "0x24db100"
+        },
+        {
+          "offset_hex": "0xc4b",
+          "target_rva_hex": "0x24e2b90"
+        },
+        {
+          "offset_hex": "0xc90",
+          "target_rva_hex": "0x24097b0"
+        },
+        {
+          "offset_hex": "0xcc9",
+          "target_rva_hex": "0x2407000"
+        },
+        {
+          "offset_hex": "0xd0b",
+          "target_rva_hex": "0x2409440"
+        },
+        {
+          "offset_hex": "0xd42",
+          "target_rva_hex": "0x24e29d0"
+        },
+        {
+          "offset_hex": "0xe20",
+          "target_rva_hex": "0x24e30b0"
+        },
+        {
+          "offset_hex": "0xe49",
+          "target_rva_hex": "0x27bbd00"
+        },
+        {
+          "offset_hex": "0xe58",
+          "target_rva_hex": "0x28cef30"
+        },
+        {
+          "offset_hex": "0xe88",
+          "target_rva_hex": "0x24097b0"
+        },
+        {
+          "offset_hex": "0xebc",
+          "target_rva_hex": "0x2407000"
+        },
+        {
+          "offset_hex": "0xedd",
+          "target_rva_hex": "0x24eb6e0"
+        },
+        {
+          "offset_hex": "0xfa9",
+          "target_rva_hex": "0x2407000"
+        },
+        {
+          "offset_hex": "0xfef",
+          "target_rva_hex": "0x2409440"
+        },
+        {
+          "offset_hex": "0x1028",
+          "target_rva_hex": "0x24e2860"
+        }
+      ]
+    },
+    "Main::Run_WindowsMessageLoop": {
+      "host_al": 149028,
+      "host_rva_hex": "0x2c803b0",
+      "host_source": "log",
+      "old_offset_hex": "0x39",
+      "mechanism": "rewrite_call5",
+      "e8_destinations": [
+        {
+          "offset_hex": "0x2d",
+          "target_rva_hex": "0x2c95800"
+        },
+        {
+          "offset_hex": "0x3c",
+          "target_rva_hex": "0x22d1570"
+        },
+        {
+          "offset_hex": "0x51",
+          "target_rva_hex": "0x33eec0"
+        },
+        {
+          "offset_hex": "0x60",
+          "target_rva_hex": "0x1388900"
+        },
+        {
+          "offset_hex": "0x7c",
+          "target_rva_hex": "0x3551620"
+        },
+        {
+          "offset_hex": "0x95",
+          "target_rva_hex": "0x2313660"
+        },
+        {
+          "offset_hex": "0xa4",
+          "target_rva_hex": "0x1388900"
+        },
+        {
+          "offset_hex": "0xb4",
+          "target_rva_hex": "0x3551250"
+        },
+        {
+          "offset_hex": "0xc3",
+          "target_rva_hex": "0x319360"
+        },
+        {
+          "offset_hex": "0xd9",
+          "target_rva_hex": "0x33aab0"
+        },
+        {
+          "offset_hex": "0xe6",
+          "target_rva_hex": "0x2c95800"
+        },
+        {
+          "offset_hex": "0xf9",
+          "target_rva_hex": "0x319360"
+        },
+        {
+          "offset_hex": "0x109",
+          "target_rva_hex": "0x1709750"
+        },
+        {
+          "offset_hex": "0x115",
+          "target_rva_hex": "0x32e640"
+        },
+        {
+          "offset_hex": "0x11e",
+          "target_rva_hex": "0x3191b0"
+        },
+        {
+          "offset_hex": "0x128",
+          "target_rva_hex": "0x3191b0"
+        },
+        {
+          "offset_hex": "0x131",
+          "target_rva_hex": "0x326de0"
+        },
+        {
+          "offset_hex": "0x14a",
+          "target_rva_hex": "0x2313660"
+        },
+        {
+          "offset_hex": "0x154",
+          "target_rva_hex": "0x3191b0"
+        },
+        {
+          "offset_hex": "0x168",
+          "target_rva_hex": "0x2cb2eb0"
+        },
+        {
+          "offset_hex": "0x196",
+          "target_rva_hex": "0x587340"
+        },
+        {
+          "offset_hex": "0x1c1",
+          "target_rva_hex": "0x2c99530"
+        },
+        {
+          "offset_hex": "0x1c9",
+          "target_rva_hex": "0x2cb3bd0"
+        },
+        {
+          "offset_hex": "0x201",
+          "target_rva_hex": "0x14bbcf0"
+        },
+        {
+          "offset_hex": "0x20d",
+          "target_rva_hex": "0x2b7860"
+        },
+        {
+          "offset_hex": "0x230",
+          "target_rva_hex": "0x22cb8f0"
+        },
+        {
+          "offset_hex": "0x26f",
+          "target_rva_hex": "0x1388900"
+        },
+        {
+          "offset_hex": "0x297",
+          "target_rva_hex": "0x35516b0"
+        },
+        {
+          "offset_hex": "0x2a8",
+          "target_rva_hex": "0x33a8c0"
+        },
+        {
+          "offset_hex": "0x2b9",
+          "target_rva_hex": "0x33a8b0"
+        },
+        {
+          "offset_hex": "0x2cc",
+          "target_rva_hex": "0x33a8a0"
+        },
+        {
+          "offset_hex": "0x2f6",
+          "target_rva_hex": "0x133fee0"
+        },
+        {
+          "offset_hex": "0x334",
+          "target_rva_hex": "0x587340"
+        },
+        {
+          "offset_hex": "0x33d",
+          "target_rva_hex": "0x133fee0"
+        },
+        {
+          "offset_hex": "0x363",
+          "target_rva_hex": "0x587340"
+        },
+        {
+          "offset_hex": "0x36e",
+          "target_rva_hex": "0x2b23e0"
+        },
+        {
+          "offset_hex": "0x391",
+          "target_rva_hex": "0x2c83d50"
+        },
+        {
+          "offset_hex": "0x3a2",
+          "target_rva_hex": "0x5e46e0"
+        },
+        {
+          "offset_hex": "0x3b8",
+          "target_rva_hex": "0x2b24b0"
+        },
+        {
+          "offset_hex": "0x3c5",
+          "target_rva_hex": "0x2b3630"
+        },
+        {
+          "offset_hex": "0x3d5",
+          "target_rva_hex": "0x1388900"
+        },
+        {
+          "offset_hex": "0x403",
+          "target_rva_hex": "0x2ca5410"
+        },
+        {
+          "offset_hex": "0x415",
+          "target_rva_hex": "0x2b3630"
+        },
+        {
+          "offset_hex": "0x41e",
+          "target_rva_hex": "0x138df50"
+        },
+        {
+          "offset_hex": "0x43d",
+          "target_rva_hex": "0x133fee0"
+        },
+        {
+          "offset_hex": "0x452",
+          "target_rva_hex": "0x18555008"
+        },
+        {
+          "offset_hex": "0x46a",
+          "target_rva_hex": "0x22d1570"
+        },
+        {
+          "offset_hex": "0x489",
+          "target_rva_hex": "0x133fee0"
+        },
+        {
+          "offset_hex": "0x51b",
+          "target_rva_hex": "0x587340"
+        },
+        {
+          "offset_hex": "0x524",
+          "target_rva_hex": "0x133fee0"
+        }
+      ]
+    },
+    "ShipHudDataModel::PerformInputProcessing@1st": {
+      "host_al": 137087,
+      "host_rva_hex": "0x27daf60",
+      "host_source": "log",
+      "old_offset_hex": "0x7af",
+      "mechanism": "rewrite_call5",
+      "e8_destinations": [
+        {
+          "offset_hex": "0x1c4",
+          "target_rva_hex": "0x3660ab0"
+        },
+        {
+          "offset_hex": "0x280",
+          "target_rva_hex": "0x28cfb80"
+        },
+        {
+          "offset_hex": "0x2c7",
+          "target_rva_hex": "0x28cef30"
+        },
+        {
+          "offset_hex": "0x2e4",
+          "target_rva_hex": "0x28cef30"
+        },
+        {
+          "offset_hex": "0x2f7",
+          "target_rva_hex": "0x28cef30"
+        },
+        {
+          "offset_hex": "0x383",
+          "target_rva_hex": "0x28cef10"
+        },
+        {
+          "offset_hex": "0x4a3",
+          "target_rva_hex": "0x28cef10"
+        },
+        {
+          "offset_hex": "0x574",
+          "target_rva_hex": "0x4b704025"
+        },
+        {
+          "offset_hex": "0x5a4",
+          "target_rva_hex": "0x28cef10"
+        },
+        {
+          "offset_hex": "0x654",
+          "target_rva_hex": "0x4b704105"
+        },
+        {
+          "offset_hex": "0x684",
+          "target_rva_hex": "0x28cef10"
+        },
+        {
+          "offset_hex": "0x753",
+          "target_rva_hex": "0x28cef10"
+        },
+        {
+          "offset_hex": "0x80f",
+          "target_rva_hex": "0x28cef10"
+        },
+        {
+          "offset_hex": "0x8b8",
+          "target_rva_hex": "0x2c5db0"
+        },
+        {
+          "offset_hex": "0x8f0",
+          "target_rva_hex": "0x3660ab0"
+        },
+        {
+          "offset_hex": "0x925",
+          "target_rva_hex": "0x22c9910"
+        },
+        {
+          "offset_hex": "0xa5d",
+          "target_rva_hex": "0x3660ab0"
+        },
+        {
+          "offset_hex": "0xb2d",
+          "target_rva_hex": "0x3660ab0"
+        },
+        {
+          "offset_hex": "0xb8f",
+          "target_rva_hex": "0x2ba6e0"
+        },
+        {
+          "offset_hex": "0xbb1",
+          "target_rva_hex": "0x3660ab0"
+        },
+        {
+          "offset_hex": "0xbf4",
+          "target_rva_hex": "0x27e37b0"
+        },
+        {
+          "offset_hex": "0xc07",
+          "target_rva_hex": "0x22cea30"
+        },
+        {
+          "offset_hex": "0xc20",
+          "target_rva_hex": "0x27e3910"
+        },
+        {
+          "offset_hex": "0xc69",
+          "target_rva_hex": "0x22cb8f0"
+        },
+        {
+          "offset_hex": "0xcc3",
+          "target_rva_hex": "0x3661188"
+        },
+        {
+          "offset_hex": "0xcdf",
+          "target_rva_hex": "0x3661188"
+        },
+        {
+          "offset_hex": "0xd60",
+          "target_rva_hex": "0x27f8fc0"
+        },
+        {
+          "offset_hex": "0xd7a",
+          "target_rva_hex": "0x27daae0"
+        },
+        {
+          "offset_hex": "0xd8b",
+          "target_rva_hex": "0x27da970"
+        },
+        {
+          "offset_hex": "0xda5",
+          "target_rva_hex": "0x27daae0"
+        },
+        {
+          "offset_hex": "0xdb6",
+          "target_rva_hex": "0x27da970"
+        },
+        {
+          "offset_hex": "0xdd0",
+          "target_rva_hex": "0x27daae0"
+        },
+        {
+          "offset_hex": "0xde1",
+          "target_rva_hex": "0x27da970"
+        },
+        {
+          "offset_hex": "0xdeb",
+          "target_rva_hex": "0x27dddf0"
+        },
+        {
+          "offset_hex": "0xe4a",
+          "target_rva_hex": "0x22c9910"
+        },
+        {
+          "offset_hex": "0xe9b",
+          "target_rva_hex": "0x22c9910"
+        },
+        {
+          "offset_hex": "0xf59",
+          "target_rva_hex": "0x27e0140"
+        },
+        {
+          "offset_hex": "0x1025",
+          "target_rva_hex": "0x22cb470"
+        },
+        {
+          "offset_hex": "0x103c",
+          "target_rva_hex": "0x3661188"
+        },
+        {
+          "offset_hex": "0x1077",
+          "target_rva_hex": "0x27daae0"
+        },
+        {
+          "offset_hex": "0x10ce",
+          "target_rva_hex": "0x22cb300"
+        },
+        {
+          "offset_hex": "0x11bc",
+          "target_rva_hex": "0x3660dc0"
+        },
+        {
+          "offset_hex": "0x11ed",
+          "target_rva_hex": "0x3661108"
+        },
+        {
+          "offset_hex": "0x11f9",
+          "target_rva_hex": "0x3660d60"
+        },
+        {
+          "offset_hex": "0x123e",
+          "target_rva_hex": "0x3661188"
+        },
+        {
+          "offset_hex": "0x125d",
+          "target_rva_hex": "0x3661188"
+        },
+        {
+          "offset_hex": "0x1271",
+          "target_rva_hex": "0x2b8150"
+        },
+        {
+          "offset_hex": "0x12a1",
+          "target_rva_hex": "0x27db140"
+        },
+        {
+          "offset_hex": "0x12c5",
+          "target_rva_hex": "0x27de480"
+        },
+        {
+          "offset_hex": "0x12fe",
+          "target_rva_hex": "0x27de480"
+        }
+      ]
+    },
+    "ShipHudDataModel::PerformInputProcessing@2nd": {
+      "host_al": 137087,
+      "host_rva_hex": "0x27daf60",
+      "host_source": "log",
+      "old_offset_hex": "0x82a",
+      "mechanism": "rewrite_call5",
+      "e8_destinations": [
+        {
+          "offset_hex": "0x1c4",
+          "target_rva_hex": "0x3660ab0"
+        },
+        {
+          "offset_hex": "0x280",
+          "target_rva_hex": "0x28cfb80"
+        },
+        {
+          "offset_hex": "0x2c7",
+          "target_rva_hex": "0x28cef30"
+        },
+        {
+          "offset_hex": "0x2e4",
+          "target_rva_hex": "0x28cef30"
+        },
+        {
+          "offset_hex": "0x2f7",
+          "target_rva_hex": "0x28cef30"
+        },
+        {
+          "offset_hex": "0x383",
+          "target_rva_hex": "0x28cef10"
+        },
+        {
+          "offset_hex": "0x4a3",
+          "target_rva_hex": "0x28cef10"
+        },
+        {
+          "offset_hex": "0x574",
+          "target_rva_hex": "0x4b704025"
+        },
+        {
+          "offset_hex": "0x5a4",
+          "target_rva_hex": "0x28cef10"
+        },
+        {
+          "offset_hex": "0x654",
+          "target_rva_hex": "0x4b704105"
+        },
+        {
+          "offset_hex": "0x684",
+          "target_rva_hex": "0x28cef10"
+        },
+        {
+          "offset_hex": "0x753",
+          "target_rva_hex": "0x28cef10"
+        },
+        {
+          "offset_hex": "0x80f",
+          "target_rva_hex": "0x28cef10"
+        },
+        {
+          "offset_hex": "0x8b8",
+          "target_rva_hex": "0x2c5db0"
+        },
+        {
+          "offset_hex": "0x8f0",
+          "target_rva_hex": "0x3660ab0"
+        },
+        {
+          "offset_hex": "0x925",
+          "target_rva_hex": "0x22c9910"
+        },
+        {
+          "offset_hex": "0xa5d",
+          "target_rva_hex": "0x3660ab0"
+        },
+        {
+          "offset_hex": "0xb2d",
+          "target_rva_hex": "0x3660ab0"
+        },
+        {
+          "offset_hex": "0xb8f",
+          "target_rva_hex": "0x2ba6e0"
+        },
+        {
+          "offset_hex": "0xbb1",
+          "target_rva_hex": "0x3660ab0"
+        },
+        {
+          "offset_hex": "0xbf4",
+          "target_rva_hex": "0x27e37b0"
+        },
+        {
+          "offset_hex": "0xc07",
+          "target_rva_hex": "0x22cea30"
+        },
+        {
+          "offset_hex": "0xc20",
+          "target_rva_hex": "0x27e3910"
+        },
+        {
+          "offset_hex": "0xc69",
+          "target_rva_hex": "0x22cb8f0"
+        },
+        {
+          "offset_hex": "0xcc3",
+          "target_rva_hex": "0x3661188"
+        },
+        {
+          "offset_hex": "0xcdf",
+          "target_rva_hex": "0x3661188"
+        },
+        {
+          "offset_hex": "0xd60",
+          "target_rva_hex": "0x27f8fc0"
+        },
+        {
+          "offset_hex": "0xd7a",
+          "target_rva_hex": "0x27daae0"
+        },
+        {
+          "offset_hex": "0xd8b",
+          "target_rva_hex": "0x27da970"
+        },
+        {
+          "offset_hex": "0xda5",
+          "target_rva_hex": "0x27daae0"
+        },
+        {
+          "offset_hex": "0xdb6",
+          "target_rva_hex": "0x27da970"
+        },
+        {
+          "offset_hex": "0xdd0",
+          "target_rva_hex": "0x27daae0"
+        },
+        {
+          "offset_hex": "0xde1",
+          "target_rva_hex": "0x27da970"
+        },
+        {
+          "offset_hex": "0xdeb",
+          "target_rva_hex": "0x27dddf0"
+        },
+        {
+          "offset_hex": "0xe4a",
+          "target_rva_hex": "0x22c9910"
+        },
+        {
+          "offset_hex": "0xe9b",
+          "target_rva_hex": "0x22c9910"
+        },
+        {
+          "offset_hex": "0xf59",
+          "target_rva_hex": "0x27e0140"
+        },
+        {
+          "offset_hex": "0x1025",
+          "target_rva_hex": "0x22cb470"
+        },
+        {
+          "offset_hex": "0x103c",
+          "target_rva_hex": "0x3661188"
+        },
+        {
+          "offset_hex": "0x1077",
+          "target_rva_hex": "0x27daae0"
+        },
+        {
+          "offset_hex": "0x10ce",
+          "target_rva_hex": "0x22cb300"
+        },
+        {
+          "offset_hex": "0x11bc",
+          "target_rva_hex": "0x3660dc0"
+        },
+        {
+          "offset_hex": "0x11ed",
+          "target_rva_hex": "0x3661108"
+        },
+        {
+          "offset_hex": "0x11f9",
+          "target_rva_hex": "0x3660d60"
+        },
+        {
+          "offset_hex": "0x123e",
+          "target_rva_hex": "0x3661188"
+        },
+        {
+          "offset_hex": "0x125d",
+          "target_rva_hex": "0x3661188"
+        },
+        {
+          "offset_hex": "0x1271",
+          "target_rva_hex": "0x2b8150"
+        },
+        {
+          "offset_hex": "0x12a1",
+          "target_rva_hex": "0x27db140"
+        },
+        {
+          "offset_hex": "0x12c5",
+          "target_rva_hex": "0x27de480"
+        },
+        {
+          "offset_hex": "0x12fe",
+          "target_rva_hex": "0x27de480"
+        }
+      ]
+    },
+    "IMenu::ShowCursor": {
+      "host_al": 187256,
+      "host_rva_hex": "0x37d31f0",
+      "host_source": "log",
+      "old_offset_hex": "0x14",
+      "mechanism": "rewrite_call5",
+      "e8_destinations": [
+        {
+          "offset_hex": "0x1e",
+          "target_rva_hex": "0x31add0"
+        },
+        {
+          "offset_hex": "0xa1",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x104",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x1ee",
+          "target_rva_hex": "0x1348640"
+        },
+        {
+          "offset_hex": "0x234",
+          "target_rva_hex": "0x1348640"
+        },
+        {
+          "offset_hex": "0x283",
+          "target_rva_hex": "0x-1382cb87"
+        },
+        {
+          "offset_hex": "0x293",
+          "target_rva_hex": "0x-1382cb77"
+        },
+        {
+          "offset_hex": "0x301",
+          "target_rva_hex": "0x2b8000"
+        },
+        {
+          "offset_hex": "0x349",
+          "target_rva_hex": "0x-2fb5ce0e"
+        },
+        {
+          "offset_hex": "0x3e4",
+          "target_rva_hex": "0x3495c0"
+        },
+        {
+          "offset_hex": "0x484",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x4b1",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x4e4",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x543",
+          "target_rva_hex": "0x-1382c8c8"
+        },
+        {
+          "offset_hex": "0x563",
+          "target_rva_hex": "0x4b7d3758"
+        },
+        {
+          "offset_hex": "0x573",
+          "target_rva_hex": "0x4b7d3768"
+        },
+        {
+          "offset_hex": "0x5ba",
+          "target_rva_hex": "0x-2fb5fb52"
+        },
+        {
+          "offset_hex": "0x6c9",
+          "target_rva_hex": "0x-2fb5ca6d"
+        },
+        {
+          "offset_hex": "0x981",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0xc5a",
+          "target_rva_hex": "0x-2fb5f4b2"
+        },
+        {
+          "offset_hex": "0xcba",
+          "target_rva_hex": "0x-2fb5f452"
+        },
+        {
+          "offset_hex": "0xce1",
+          "target_rva_hex": "0x2da8f0"
+        },
+        {
+          "offset_hex": "0xd13",
+          "target_rva_hex": "0x-1382c0f8"
+        },
+        {
+          "offset_hex": "0xd51",
+          "target_rva_hex": "0x2da8f0"
+        },
+        {
+          "offset_hex": "0xdaf",
+          "target_rva_hex": "0x3660ab8"
+        },
+        {
+          "offset_hex": "0xddf",
+          "target_rva_hex": "0x3660ab8"
+        },
+        {
+          "offset_hex": "0xe5a",
+          "target_rva_hex": "0x-2fb5f2b2"
+        },
+        {
+          "offset_hex": "0xe7a",
+          "target_rva_hex": "0x-2fb5f292"
+        },
+        {
+          "offset_hex": "0xfaa",
+          "target_rva_hex": "0x-2fb5f162"
+        },
+        {
+          "offset_hex": "0x10be",
+          "target_rva_hex": "0x3189e0"
+        },
+        {
+          "offset_hex": "0x10fe",
+          "target_rva_hex": "0x3189e0"
+        },
+        {
+          "offset_hex": "0x114e",
+          "target_rva_hex": "0x3189e0"
+        },
+        {
+          "offset_hex": "0x118e",
+          "target_rva_hex": "0x3189e0"
+        },
+        {
+          "offset_hex": "0x11d3",
+          "target_rva_hex": "0x3189e0"
+        },
+        {
+          "offset_hex": "0x12ce",
+          "target_rva_hex": "0x2b7ee0"
+        },
+        {
+          "offset_hex": "0x13d1",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x147a",
+          "target_rva_hex": "0x-2fb5ec92"
+        }
+      ]
+    },
+    "UI::SetCursorStyle": {
+      "host_al": 187051,
+      "host_rva_hex": "0x37c3b00",
+      "host_source": "log",
+      "old_offset_hex": "0x98",
+      "mechanism": "rewrite_call5",
+      "e8_destinations": [
+        {
+          "offset_hex": "0x15",
+          "target_rva_hex": "0x3660ab0"
+        },
+        {
+          "offset_hex": "0x51",
+          "target_rva_hex": "0x2cc370"
+        },
+        {
+          "offset_hex": "0x63",
+          "target_rva_hex": "0x-1383c498"
+        },
+        {
+          "offset_hex": "0xe3",
+          "target_rva_hex": "0x-1383c418"
+        },
+        {
+          "offset_hex": "0x203",
+          "target_rva_hex": "0x-1383c2f8"
+        },
+        {
+          "offset_hex": "0x260",
+          "target_rva_hex": "0x-2fb6c508"
+        },
+        {
+          "offset_hex": "0x382",
+          "target_rva_hex": "0x3660ab0"
+        },
+        {
+          "offset_hex": "0x3ab",
+          "target_rva_hex": "0x2d2210"
+        },
+        {
+          "offset_hex": "0x3db",
+          "target_rva_hex": "0x2d2210"
+        },
+        {
+          "offset_hex": "0x4ce",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x4fb",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x52b",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x55b",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x58e",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x5be",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x5fe",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x63e",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x67e",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x6be",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x6fe",
+          "target_rva_hex": "0x2c4b50"
+        },
+        {
+          "offset_hex": "0x8a3",
+          "target_rva_hex": "0x4f7c43a8"
+        },
+        {
+          "offset_hex": "0x8b9",
+          "target_rva_hex": "0x3660ab8"
+        },
+        {
+          "offset_hex": "0xc54",
+          "target_rva_hex": "0x2cc370"
+        },
+        {
+          "offset_hex": "0xc91",
+          "target_rva_hex": "0x2b4f50"
+        },
+        {
+          "offset_hex": "0xcbe",
+          "target_rva_hex": "0x2d9b10"
+        },
+        {
+          "offset_hex": "0xd51",
+          "target_rva_hex": "0x3495c0"
+        },
+        {
+          "offset_hex": "0xe55",
+          "target_rva_hex": "0x3660ab0"
+        },
+        {
+          "offset_hex": "0xed5",
+          "target_rva_hex": "0x3660ab0"
+        },
+        {
+          "offset_hex": "0xef5",
+          "target_rva_hex": "0x3660ab0"
+        },
+        {
+          "offset_hex": "0x107b",
+          "target_rva_hex": "0x2b4f50"
+        },
+        {
+          "offset_hex": "0x10ae",
+          "target_rva_hex": "0x925b70"
+        },
+        {
+          "offset_hex": "0x10ee",
+          "target_rva_hex": "0x925b70"
+        },
+        {
+          "offset_hex": "0x1151",
+          "target_rva_hex": "0x3495c0"
+        },
+        {
+          "offset_hex": "0x1191",
+          "target_rva_hex": "0x2da8f0"
+        },
+        {
+          "offset_hex": "0x12da",
+          "target_rva_hex": "0x-1383b221"
+        },
+        {
+          "offset_hex": "0x14d2",
+          "target_rva_hex": "0x3660ab0"
+        }
+      ]
+    }
+  },
+  "predicate_candidates": [
+    {
+      "rva_hex": "0x28cef30",
+      "new_al_id": 139340,
+      "host_count": 4,
+      "hosts": [
+        "PlayerControls::LookHandler::Func10",
+        "PlayerControls::Manager::ProcessLookInput",
+        "ShipHudDataModel::PerformInputProcessing@1st",
+        "ShipHudDataModel::PerformInputProcessing@2nd"
+      ]
+    },
+    {
+      "rva_hex": "0x2b8150",
+      "new_al_id": 35720,
+      "host_count": 3,
+      "hosts": [
+        "PlayerControls::LookHandler::Func10",
+        "ShipHudDataModel::PerformInputProcessing@1st",
+        "ShipHudDataModel::PerformInputProcessing@2nd"
+      ]
+    },
+    {
+      "rva_hex": "0x28cef10",
+      "new_al_id": 139339,
+      "host_count": 3,
+      "hosts": [
+        "PlayerControls::LookHandler::Func10",
+        "ShipHudDataModel::PerformInputProcessing@1st",
+        "ShipHudDataModel::PerformInputProcessing@2nd"
+      ]
+    },
+    {
+      "rva_hex": "0x22c9910",
+      "new_al_id": 123785,
+      "host_count": 3,
+      "hosts": [
+        "PlayerControls::LookHandler::Func10",
+        "ShipHudDataModel::PerformInputProcessing@1st",
+        "ShipHudDataModel::PerformInputProcessing@2nd"
+      ]
+    },
+    {
+      "rva_hex": "0x28cfb80",
+      "new_al_id": 139352,
+      "host_count": 3,
+      "hosts": [
+        "PlayerControls::LookHandler::Func10",
+        "ShipHudDataModel::PerformInputProcessing@1st",
+        "ShipHudDataModel::PerformInputProcessing@2nd"
+      ]
+    },
+    {
+      "rva_hex": "0x22cb8f0",
+      "new_al_id": 123824,
+      "host_count": 3,
+      "hosts": [
+        "Main::Run_WindowsMessageLoop",
+        "ShipHudDataModel::PerformInputProcessing@1st",
+        "ShipHudDataModel::PerformInputProcessing@2nd"
+      ]
+    },
+    {
+      "rva_hex": "0x3660ab0",
+      "new_al_id": 182799,
+      "host_count": 3,
+      "hosts": [
+        "ShipHudDataModel::PerformInputProcessing@1st",
+        "ShipHudDataModel::PerformInputProcessing@2nd",
+        "UI::SetCursorStyle"
+      ]
+    },
+    {
+      "rva_hex": "0x2409440",
+      "new_al_id": 126701,
+      "host_count": 2,
+      "hosts": [
+        "PlayerControls::LookHandler::Func10",
+        "PlayerControls::Manager::ProcessLookInput"
+      ]
+    },
+    {
+      "rva_hex": "0x2c5db0",
+      "new_al_id": 36005,
+      "host_count": 2,
+      "hosts": [
+        "ShipHudDataModel::PerformInputProcessing@1st",
+        "ShipHudDataModel::PerformInputProcessing@2nd"
+      ]
+    },
+    {
+      "rva_hex": "0x2ba6e0",
+      "new_al_id": 35771,
+      "host_count": 2,
+      "hosts": [
+        "ShipHudDataModel::PerformInputProcessing@1st",
+        "ShipHudDataModel::PerformInputProcessing@2nd"
+      ]
+    }
+  ],
+  "derivation_notes": [
+    "host_source='log' means RVA was extracted from a SimultaneousInput.log skip message; that's the runtime-truth resolution.",
+    "host_source='db_parse' means we used m_v5[al_id] from the AL DB file directly. This may diverge from runtime resolution if a prior process created the COMMONLIB_IDDB_OFFSETS_<ver> named map with different data.",
+    "predicate_candidates is the set of E8 destinations shared across host bodies; the most-shared destination (typically 0x3660ab0 in 1.16.236) is the runtime equivalent of the original IsUsingGamepad."
+  ]
+}
