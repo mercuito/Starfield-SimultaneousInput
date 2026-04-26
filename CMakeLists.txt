@@ -87,9 +87,13 @@ target_compile_definitions(commonlib-shared PUBLIC
 # here: libxse pre-formats via std::vformat before calling spdlog with plain
 # string_view, so we keep spdlog's default fmt backend.
 target_link_libraries(commonlib-shared PUBLIC spdlog::spdlog)
+# spdlog rebuilt with wchar feature in vcpkg.json -> SPDLOG_WCHAR_TO_UTF8_SUPPORT
+# is compiled into the lib. We mirror it on the consumer side so the wstring_view
+# log overloads in spdlog headers are visible.
+# We do NOT define SPDLOG_WCHAR_FILENAMES (filename_t stays std::string), so
+# libxse's API.cpp passing path->string() to file sinks compiles cleanly.
 target_compile_definitions(commonlib-shared PUBLIC
 	SPDLOG_WCHAR_TO_UTF8_SUPPORT
-	SPDLOG_WCHAR_FILENAMES
 )
 target_link_libraries(commonlib-shared PUBLIC
 	advapi32.lib bcrypt.lib dbghelp.lib dxgi.lib ole32.lib
