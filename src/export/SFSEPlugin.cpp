@@ -205,19 +205,21 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	// and (when trampoline=true) reserves trampoline space from SFSE's
 	// branch pool, falling back to a self-allocated trampoline.
 	//
-	// Trampoline budget: 28 bytes = 5 (write_call) per replacement, rounded
-	// up. We install 7 trampoline calls below; 5 * 7 = 35, but several share
-	// targets and the trampoline only needs unique 5-byte stubs per call
-	// site, so 28 is enough. Bump this if we add hooks. We deliberately use
-	// the InitInfo path instead of the deprecated SFSE::AllocTrampoline to
-	// stay /WX-clean (C4996 with the prior call).
+	// Trampoline budget: 32 bytes covers the six trampoline calls we install
+	// on 1.16.236 (LookHandler::Func10, ProcessLookInput, ShipHud x2,
+	// IMenu::ShowCursor, UI::SetCursorStyle). The 1.8.86-era
+	// Run_WindowsMessageLoop hook is no longer attempted because the
+	// underlying predicate call was refactored out of the message pump in
+	// 1.16.236; see MAINTAINING.md section 7. Bump this if we add hooks. We
+	// deliberately use the InitInfo path instead of the deprecated
+	// SFSE::AllocTrampoline to stay /WX-clean (C4996 with the prior call).
 	//
 	// Logs land in %USERPROFILE%/Documents/My Games/Starfield/SFSE/Logs/
 	// SimultaneousInput.log, the same dir SFSE writes sfse.log, so users
 	// get one consolidated log folder.
 	SFSE::Init(a_sfse, SFSE::InitInfo{
 		.trampoline = true,
-		.trampolineSize = 28,
+		.trampolineSize = 32,
 	});
 	LogRuntimeProbe(a_sfse);
 
@@ -297,39 +299,46 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	}
 
 	// === Look-input call replacements (predicate IsUsingGamepad -> IsUsingThumbstickLook) ===
+	// Offsets re-derived against Starfield 1.16.236 via
+	// tools/derive_function_ids.py: each is the position of an E8 call to
+	// the look-variant predicate (RVA 0x28cef30, AL 139340) inside the
+	// host function body.
 	TryWriteCall<5>(
-		RE::Offset::PlayerControls::LookHandler::Func10, 0xE,
+		RE::Offset::PlayerControls::LookHandler::Func10, 0x196,
 		IsUsingThumbstickLook,
 		"LookHandler::Func10 (2-quadrant slow-movement fix)");
 
 	TryWriteCall<5>(
-		RE::Offset::PlayerControls::Manager::ProcessLookInput, 0x68,
+		RE::Offset::PlayerControls::Manager::ProcessLookInput, 0x33F,
 		IsUsingThumbstickLook,
 		"PlayerControls::Manager::ProcessLookInput (look sensitivity)");
 
-	TryWriteCall<5>(
-		RE::Offset::Main::Run_WindowsMessageLoop, 0x39,
-		IsUsingThumbstickLook,
-		"Main::Run_WindowsMessageLoop (cursor window-capture)");
+	// Main::Run_WindowsMessageLoop +0x39 (1.8.86) had no analog on
+	// 1.16.236: the host body has 775 E8 calls in its first 24 KB and
+	// none target either predicate variant. The cursor-capture branch was
+	// inlined or moved. Hook permanently retired; see MAINTAINING.md
+	// section 7.
 
 	TryWriteCall<5>(
-		RE::Offset::ShipHudDataModel::PerformInputProcessing, 0x7AF,
+		RE::Offset::ShipHudDataModel::PerformInputProcessing, 0x2C7,
 		IsUsingThumbstickLook,
-		"ShipHudDataModel::PerformInputProcessing+0x7AF (ship reticle)");
+		"ShipHudDataModel::PerformInputProcessing+0x2C7 (ship reticle pre)");
 
 	TryWriteCall<5>(
-		RE::Offset::ShipHudDataModel::PerformInputProcessing, 0x82A,
+		RE::Offset::ShipHudDataModel::PerformInputProcessing, 0x2E4,
 		IsUsingThumbstickLook,
-		"ShipHudDataModel::PerformInputProcessing+0x82A (ship reticle)");
+		"ShipHudDataModel::PerformInputProcessing+0x2E4 (ship reticle post)");
 
 	// === Cursor visibility/style call replacements (-> IsGamepadCursor) ===
+	// Offsets target the cursor-variant predicate (RVA 0x2c4b50, AL 35982);
+	// see Offset.Ext.h for the predicate-split note.
 	TryWriteCall<5>(
-		RE::Offset::IMenu::ShowCursor, 0x14,
+		RE::Offset::IMenu::ShowCursor, 0xA1,
 		IsGamepadCursor,
 		"IMenu::ShowCursor (menu cursor visibility)");
 
 	TryWriteCall<5>(
-		RE::Offset::UI::SetCursorStyle, 0x98,
+		RE::Offset::UI::SetCursorStyle, 0x4CE,
 		IsGamepadCursor,
 		"UI::SetCursorStyle (pointer vs gamepad cursor)");
 

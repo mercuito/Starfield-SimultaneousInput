@@ -120,27 +120,45 @@ format-5 ALDBs; v0/v1/v2 (legacy AE-style) are out of scope.
 
 ## 7. Status against Starfield 1.16.236
 
-A full re-derivation pass against 1.16.236 produced the following finding:
-of the 9 hooks, only the LookHandler vtable shim is cleanly portable.
+A full re-derivation pass against 1.16.236 was completed in v1.3.0. Eight of
+the nine hooks have been re-anchored against the post-refactor binary; one
+(Run_WindowsMessageLoop) is permanently retired because the predicate call
+no longer exists in the host body. The re-derivation was driven by
+`tools/derive_function_ids.py` plus a 0x6000-byte E8 scan of every host
+function (`tools/derived_1.16.236.json`).
+
+Two predicate variants now exist on 1.16.236, where 1.8.86 had only one:
+
+- Look variant `IsUsingGamepad`: RVA 0x28cef30, AL **139340**. Called from
+  the look-input hosts (LookHandler::Func10, ProcessLookInput, ShipHud).
+- Cursor variant: RVA 0x2c4b50, AL 35982. Called from the cursor hosts
+  (IMenu::ShowCursor, UI::SetCursorStyle). We do not call this AL ID
+  directly; the cursor hooks rewrite their existing `call rel32` to point at
+  our `IsGamepadCursor`, which internally invokes the look variant. The
+  semantic is preserved because both variants return "is gamepad currently
+  active".
 
 | Hook | AL ID | 1.16.236 status |
 |---|---|---|
-| LookHandler vtable shim (slot 1)         | 433589 | works (vtable layout preserved, ID re-anchored from libxse `IDs_VTABLE.h`) |
-| BSPCGamepadDevice::Poll byte patch +0x2A0 | 179249 | `C6 43 08 01` pattern absent; Poll body fully refactored |
-| LookHandler::Func10 E8 +0x0E              | 129152 | function exists (0x250 bytes) but no E8 at +0x0E; 13 E8 sites within body, none with predicate-shaped target |
-| Manager::ProcessLookInput E8 +0x68        | 129407 | thunk; real entry is alid 129441; nearest E8 at +0x6B targets a 0x1B0-byte vector function, not a predicate |
-| Main::Run_WindowsMessageLoop E8 +0x39     | 149028 | function exists (0x250 bytes); 27 E8 sites; no clear predicate analog |
-| ShipHudDataModel::PerformInputProcessing E8 +0x7AF / +0x82A | 137087 | function shrank to 0x50 bytes; uses `ff 50 40` indirect vfunc dispatch instead of E8 calls |
-| IMenu::ShowCursor E8 +0x14                | 187256 | function exists (0x80 bytes); single E8 at +0x1E targets a struct-cleanup function, not IsGamepadCursor |
-| UI::SetCursorStyle E8 +0x98               | 187051 | function exists (0x20 bytes); single E8 at +0x15 targets a 0x2a8-sized notifier, not a style chooser |
-| BSInputDeviceManager::IsUsingGamepad      | 178879 | now resolves to a spdlog-style logging stub, not a callable predicate |
+| LookHandler vtable shim (slot 1)         | 433589 | installed; vtable layout preserved, AL re-anchored via libxse `IDs_VTABLE.h`, verified in-game on v1.2.0 |
+| BSPCGamepadDevice::Poll byte patch       | 124384 | installed; AL re-anchored from vtable[470133][1] scan. Anchor `C6 43 08 01` lives at +0x51d (was +0x2A0). Plugin scans first 0x800 bytes for the pattern so future minor refactors do not require a code change. |
+| LookHandler::Func10 E8 site              | 129152 | installed at +0x196 (was +0x0E). Three predicate calls cluster at +0x196 / +0x1a4 / +0x236; we hook the first. |
+| Manager::ProcessLookInput E8 site        | 129407 | installed at +0x33F (was +0x68). Three predicate calls cluster at +0x33F / +0x34A / +0x355. |
+| Main::Run_WindowsMessageLoop E8 site     | 149028 | retired. Host body is 24 KB with 775 E8 calls and zero target the predicate; cursor-capture branch was either inlined into the message handler or moved to a different function. AL ID retained for diagnostic purposes only; no TryWriteCall is attempted. |
+| ShipHudDataModel::PerformInputProcessing pre  | 137087 | installed at +0x2C7 (was +0x7AF). Predicate cluster +0x2C7 / +0x2E4 / +0x2F7. |
+| ShipHudDataModel::PerformInputProcessing post | 137087 | installed at +0x2E4 (was +0x82A). Same cluster, second call. |
+| IMenu::ShowCursor E8 site                | 187256 | installed at +0xA1 (was +0x14). Host is unchanged across the refactor; 7 calls to the cursor predicate, first at +0xA1. (An earlier attempt migrated to AL 42816 from a libxse vtable read; that AL resolves to a tiny 8-byte getter, not ShowCursor. Reverted.) |
+| UI::SetCursorStyle E8 site               | 187051 | installed at +0x4CE (was +0x98). 11 calls to the cursor predicate; we hook the first. |
+| BSInputDeviceManager::IsUsingGamepad     | 139340 | re-anchored from old AL 178879 (which now resolves to a logging stub). Look variant; called by IsGamepadCursor for the cursor-host redirect. |
 
-The 8 call-replacement hooks fail safely (the runtime probe checks for `E8`
-at the documented offset before writing). `SimultaneousInput.log` will show
-"hook ... skipped" for each.
+Expected runtime: 8/9 hooks installed, 1 skipped. The skipped hook
+(Run_WindowsMessageLoop cursor capture) is logged at WARN level; in-game
+impact is that the OS cursor may be confined to the window whenever a
+controller is plugged in, which is the engine's default and what
+1.16.236 vanilla already does.
 
-Restoring the call-replacement hooks for 1.16.236 requires a Ghidra-grade
-pass: identify the analogous code paths (Bethesda likely inlined or moved
-the device-active check), then either choose a new patch site or restructure
-the mod's hook strategy. That work is out of scope for a per-patch
-maintenance pass and is tracked separately.
+If a future patch shifts these offsets again, re-run
+`tools/derive_function_ids.py --exe <Starfield.exe> --db <versionlib.bin>`
+and re-derive against the resulting `derived_<ver>.json`. The byte-pattern
+scan for BSPCGamepadDevice::Poll is the most resilient pattern; the others
+need offset updates but the AL IDs should stay stable across minor patches.
