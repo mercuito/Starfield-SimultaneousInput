@@ -54,11 +54,27 @@ namespace RE
 		// the per-event entry point we replace with a shim that splits look
 		// input by event type. Func10 +0xE is a call that gates a slow-
 		// movement-on-2-quadrants behavior.
+		//
+		// Vtbl was 407288 (Parapets, captured against Starfield 1.8.86). On
+		// 1.16.236 that ID resolves to a non-vtable address; write_vfunc(1, ...)
+		// silently overwrites slot 1 of whatever struct lives there, which
+		// explains in-game weirdness even though the install logs as
+		// "successful" (write_vfunc has no pattern check). Replaced with the
+		// libxse canonical value for 1.16.236, sourced from
+		// external/CommonLibSF/include/RE/IDs_VTABLE.h:
+		//   inline constexpr std::array<REL::ID, 1> PlayerControls__LookHandler{ REL::ID(433589) };
+		// libxse RUNTIME_LATEST is 1.16.236 (external/CommonLibSF/include/SFSE/Version.h),
+		// so this ID is the post-refactor anchor for the 1.16.236 AL DB.
+		//
+		// Func10 (129152) is a member function AL ID, not an RTTI/vtable ID,
+		// so libxse cannot supply it. Its 1.16.236 replacement has to be
+		// re-derived via tools/derive_function_ids.ps1 against Starfield.exe
+		// + versionlib-1-16-236.bin on the gaming machine.
 		namespace PlayerControls
 		{
 			namespace LookHandler
 			{
-				constexpr REL::ID Vtbl{ 407288 };
+				constexpr REL::ID Vtbl{ 433589 };
 				constexpr REL::ID Func10{ 129152 };
 			}
 
