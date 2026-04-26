@@ -85,14 +85,21 @@ if(WIN32)
 endif()
 
 if(MSVC)
-	# wchar_t-aware spdlog (commonlib-shared opts in via xmake config). Without
-	# this define spdlog's wchar overloads (used by REX::FAIL with wstring_view)
-	# get linker-stripped and we hit unresolved externals.
-	target_compile_definitions(commonlib-shared PUBLIC
-		SPDLOG_WCHAR_TO_UTF8_SUPPORT
-		SPDLOG_WCHAR_FILENAMES
-		SPDLOG_USE_STD_FORMAT
-	)
+	# spdlog config alignment with vcpkg's binary build:
+	# vcpkg ships spdlog without SPDLOG_WCHAR_FILENAMES so its file_sink ABI
+	# uses std::string (not std::wstring) for filenames. We deliberately do
+	# NOT define SPDLOG_WCHAR_FILENAMES on consumers here; defining it would
+	# flip the consumer-side filename_t type and produce
+	#   error C2665: spdlog::sinks::basic_file_sink::basic_file_sink: no
+	#   overloaded function could convert all the argument types
+	# at the std::construct_at call inside <xutility>. SPDLOG_USE_STD_FORMAT
+	# is similarly skipped: we accept fmtlib by default which is what vcpkg
+	# builds spdlog against.
+	#
+	# REX::FAIL with wstring_view still works because its impl funnels through
+	# spdlog::default_logger_raw()->log(...), which is template-instantiated
+	# in commonlib-shared's REX/LOG.cpp (non-WCHAR ABI). The only thing we
+	# lose is wstring filenames; we don't use those.
 	target_compile_options(commonlib-shared PRIVATE
 		/utf-8
 		/permissive-
