@@ -98,6 +98,17 @@ if(MSVC)
 		/permissive-
 		/Zc:preprocessor
 		/EHsc
+		/bigobj
+	)
+
+	# commonlib-shared sources rely on the PCH (REX/BASE.h via src/REX/PCH.h)
+	# for all of <cstdint>, <cstdarg>, <ranges>, <format>, etc. Without it the
+	# standard headers (vcruntime.h's __report_gsfailure declaration, ucrt's
+	# corecrt_wstdio.h va_list usage) fail with C2065 'uintptr_t': undeclared
+	# identifier and friends. xmake.lua sets set_pcxxheader("src/REX/PCH.h"),
+	# so we mirror that here.
+	target_precompile_headers(commonlib-shared PRIVATE
+		"${_clshared_root}/src/REX/PCH.h"
 	)
 endif()
 
