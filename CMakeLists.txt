@@ -81,6 +81,14 @@ target_compile_definitions(commonlib-shared PUBLIC
 	_ITERATOR_DEBUG_LEVEL=0
 )
 target_link_libraries(commonlib-shared PUBLIC spdlog::spdlog)
+# Match libxse's xmake build: spdlog with wchar overloads + std::format backend.
+# These defines must be set at every TU that includes spdlog.h, which means
+# PUBLIC so the plugin's TUs see them too.
+target_compile_definitions(commonlib-shared PUBLIC
+	SPDLOG_WCHAR_TO_UTF8_SUPPORT
+	SPDLOG_WCHAR_FILENAMES
+	SPDLOG_USE_STD_FORMAT
+)
 target_link_libraries(commonlib-shared PUBLIC
 	advapi32.lib bcrypt.lib dbghelp.lib dxgi.lib ole32.lib
 	shell32.lib user32.lib version.lib ws2_32.lib
