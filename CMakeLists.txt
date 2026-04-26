@@ -96,8 +96,8 @@ target_compile_definitions(commonlib-shared PUBLIC
 	SPDLOG_WCHAR_TO_UTF8_SUPPORT
 )
 target_link_libraries(commonlib-shared PUBLIC
-	advapi32.lib bcrypt.lib dbghelp.lib dxgi.lib ole32.lib
-	shell32.lib user32.lib version.lib ws2_32.lib
+	advapi32.lib bcrypt.lib d3d11.lib d3dcompiler.lib dbghelp.lib
+	dxgi.lib ole32.lib shell32.lib user32.lib version.lib ws2_32.lib
 )
 if(MSVC)
 	target_compile_options(commonlib-shared PUBLIC /bigobj)
