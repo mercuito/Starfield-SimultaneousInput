@@ -68,6 +68,11 @@ file(
 add_library(commonlib-shared STATIC ${COMMONLIB_SHARED_SOURCES})
 target_include_directories(commonlib-shared SYSTEM PUBLIC ${CLIBSHARED_DIR}/include)
 target_compile_features(commonlib-shared PUBLIC cxx_std_23)
+# REX/BASE.h pulls in all std headers (cstdint, format, etc) and is the de-facto
+# PCH for the libxse code. Force-include so individual TUs don't have to.
+target_precompile_headers(commonlib-shared PRIVATE
+	${CLIBSHARED_DIR}/include/REX/BASE.h
+)
 target_compile_definitions(commonlib-shared PUBLIC
 	WINVER=0x0A00
 	_WIN32_WINNT=0x0A00
