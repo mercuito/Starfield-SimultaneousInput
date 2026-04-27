@@ -1,16 +1,3 @@
-// Define NOMINMAX and WIN32_LEAN_AND_MEAN before ANY include. SFSE / libxse
-// headers transitively pull in windows.h via spdlog and std::format
-// support; if min/max macros leak in there, downstream uses of
-// std::numeric_limits<>::max() in those templates fail with C2589
-// "illegal token on right side of '::'". Hoisting these defines above the
-// first include is the only place they reliably take.
-#ifndef NOMINMAX
-#  define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#  define WIN32_LEAN_AND_MEAN
-#endif
-
 #include "Plugin.h"
 #include "RE/Offset.Ext.h"
 
@@ -40,28 +27,58 @@
 #include <thread>
 #include <utility>
 
-// Win32 surface used by the config loader and the hotkey/chord poll
-// thread: GetModuleHandleExA, GetModuleFileNameA, GetAsyncKeyState,
-// Sleep, MAX_PATH, HMODULE (windows.h); XInputGetState (xinput.h, links
-// against XInput.lib via #pragma comment below). NOMINMAX /
-// WIN32_LEAN_AND_MEAN already defined at the top of the file.
-#include <windows.h>
-#include <xinput.h>
-#pragma comment(lib, "Xinput.lib")
+// We need a small slice of Win32 + XInput to drive the config loader and
+// hotkey/chord poll thread. Including <windows.h> / <xinput.h> here
+// would re-trigger the long-running C2589 build break in the spdlog /
+// std::format expansions that REX::INFO / REX::WARN / REX::ERROR rely
+// on (min / max macros leak in even with NOMINMAX hoisted; the libxse
+// PCH chain has its own ways of pulling windows.h in). Forward-declare
+// the seven functions and one struct we touch instead. Linker resolves
+// the imports against kernel32.dll / user32.dll / Xinput.lib.
+extern "C" {
+	using DWORD   = unsigned long;
+	using WORD    = unsigned short;
+	using BYTE    = unsigned char;
+	using SHORT   = short;
+	using HMODULE = void*;
+	using LPCSTR  = const char*;
 
-// Belt-and-suspenders: even with NOMINMAX hoisted to the very top of
-// the file, libxse / SFSE pull in spdlog and std::format support that
-// processes <Windows.h> internally with its own header guards in ways
-// that have historically left min/max defined in some MSVC + libxse
-// combinations. Force-clean here so downstream uses of
-// std::numeric_limits<X>::max() in the REX::INFO / REX::WARN / REX::ERROR
-// std::format expansions compile cleanly. Cheap and idempotent.
-#ifdef min
-#  undef min
-#endif
-#ifdef max
-#  undef max
-#endif
+	struct XINPUT_GAMEPAD
+	{
+		WORD  wButtons;
+		BYTE  bLeftTrigger;
+		BYTE  bRightTrigger;
+		SHORT sThumbLX;
+		SHORT sThumbLY;
+		SHORT sThumbRX;
+		SHORT sThumbRY;
+	};
+
+	struct XINPUT_STATE
+	{
+		DWORD          dwPacketNumber;
+		XINPUT_GAMEPAD Gamepad;
+	};
+
+	__declspec(dllimport) int   __stdcall GetModuleHandleExA(DWORD, LPCSTR, HMODULE*);
+	__declspec(dllimport) DWORD __stdcall GetModuleFileNameA(HMODULE, char*, DWORD);
+	__declspec(dllimport) short __stdcall GetAsyncKeyState(int);
+	__declspec(dllimport) unsigned long long __stdcall GetTickCount64();
+	__declspec(dllimport) void  __stdcall Sleep(DWORD);
+	__declspec(dllimport) DWORD __stdcall XInputGetState(DWORD, XINPUT_STATE*);
+}
+
+#pragma comment(lib, "Xinput.lib")
+#pragma comment(lib, "user32.lib")
+
+namespace
+{
+	constexpr DWORD GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS      = 0x4;
+	constexpr DWORD GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT = 0x2;
+	constexpr DWORD MAX_PATH_LEN                                = 260;
+	constexpr DWORD ERROR_SUCCESS_VALUE                         = 0;
+	constexpr BYTE  XINPUT_TRIGGER_THRESHOLD                    = 30;
+}
 
 using namespace std::string_view_literals;
 
@@ -612,14 +629,14 @@ namespace
 				XINPUT_STATE state{};
 				const auto rc = ::XInputGetState(0, &state);
 				bool satisfied = false;
-				if (rc == ERROR_SUCCESS) {
+				if (rc == ERROR_SUCCESS_VALUE) {
 					const auto& gp = state.Gamepad;
 					const bool buttonsOk =
 						(reqButtons == 0) || ((gp.wButtons & reqButtons) == reqButtons);
 					const bool ltOk =
-						!reqLT || (gp.bLeftTrigger >= XINPUT_GAMEPAD_TRIGGER_THRESHOLD);
+						!reqLT || (gp.bLeftTrigger >= XINPUT_TRIGGER_THRESHOLD);
 					const bool rtOk =
-						!reqRT || (gp.bRightTrigger >= XINPUT_GAMEPAD_TRIGGER_THRESHOLD);
+						!reqRT || (gp.bRightTrigger >= XINPUT_TRIGGER_THRESHOLD);
 					satisfied = buttonsOk && ltOk && rtOk;
 				}
 
@@ -649,15 +666,15 @@ namespace
 		// Plugin runs from <Starfield>\Data\SFSE\Plugins\SimultaneousInput.dll;
 		// the INI sits next to the DLL so the Plugins directory remains the
 		// single source of truth for installed plugin state.
-		char dllPath[MAX_PATH] = {};
+		char dllPath[MAX_PATH_LEN] = {};
 		HMODULE thisModule = nullptr;
 		::GetModuleHandleExA(
 			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 			reinterpret_cast<LPCSTR>(&LoadConfig),
 			&thisModule);
-		const auto pathLen = ::GetModuleFileNameA(thisModule, dllPath, MAX_PATH);
+		const auto pathLen = ::GetModuleFileNameA(thisModule, dllPath, MAX_PATH_LEN);
 		std::string iniPath;
-		if (pathLen > 4 && pathLen < MAX_PATH) {
+		if (pathLen > 4 && pathLen < MAX_PATH_LEN) {
 			iniPath.assign(dllPath, pathLen - 4);  // strip .dll
 			iniPath += ".ini";
 		}
