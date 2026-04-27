@@ -541,9 +541,9 @@ namespace
 					}  // else keep default; ParseChord already logged unknown tokens
 				} else if (key == "lockglyphschordholdms") {
 					unsigned ms = 0;
-					const auto trimmed = TrimWs(val);
+					const auto holdStr = TrimWs(val);
 					auto [p, ec] = std::from_chars(
-						trimmed.data(), trimmed.data() + trimmed.size(), ms);
+						holdStr.data(), holdStr.data() + holdStr.size(), ms);
 					if (ec == std::errc{} && ms >= 50 && ms <= 5000) {
 						cfg.lockGlyphsChordHoldMs = ms;
 					}
