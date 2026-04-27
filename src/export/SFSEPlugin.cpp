@@ -1,3 +1,16 @@
+// Define NOMINMAX and WIN32_LEAN_AND_MEAN before ANY include. SFSE / libxse
+// headers transitively pull in windows.h via spdlog and std::format
+// support; if min/max macros leak in there, downstream uses of
+// std::numeric_limits<>::max() in those templates fail with C2589
+// "illegal token on right side of '::'". Hoisting these defines above the
+// first include is the only place they reliably take.
+#ifndef NOMINMAX
+#  define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
+#endif
+
 #include "Plugin.h"
 #include "RE/Offset.Ext.h"
 
@@ -27,20 +40,14 @@
 #include <thread>
 #include <utility>
 
-// Bring in windows.h ONLY for the small set of Win32 calls the config
-// loader and hotkey thread need (GetModuleHandleExA, GetModuleFileNameA,
-// GetAsyncKeyState, Sleep, MAX_PATH, HMODULE). NOMINMAX and
-// WIN32_LEAN_AND_MEAN keep `min` / `max` macros and the COM / GDI / RPC
-// surface from leaking into spdlog and std::format templates. The libxse
-// headers above use REX::W32 wrappers and never include windows.h
-// directly, so this is the first include and the macro guards take.
-#ifndef NOMINMAX
-#  define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#  define WIN32_LEAN_AND_MEAN
-#endif
+// Win32 surface used by the config loader and the hotkey/chord poll
+// thread: GetModuleHandleExA, GetModuleFileNameA, GetAsyncKeyState,
+// Sleep, MAX_PATH, HMODULE (windows.h); XInputGetState (xinput.h, links
+// against XInput.lib via #pragma comment below). NOMINMAX /
+// WIN32_LEAN_AND_MEAN already defined at the top of the file.
 #include <windows.h>
+#include <xinput.h>
+#pragma comment(lib, "Xinput.lib")
 
 using namespace std::string_view_literals;
 
@@ -63,15 +70,28 @@ namespace
 	// both still drive the camera). Default false to preserve legacy behavior
 	// for desktop users.
 	//
-	// LockGlyphsHotkey: Win32 virtual-key code polled by a low-priority
-	// background thread. On a rising edge (key transitioned from up to
-	// down), the hotkey toggles g_lockControllerGlyphs and logs the new
-	// state. Useful for testing on a desktop and for Tony's Steam Remote
-	// Play / MoonDeck workflow, where the host PC has no Deck-detection
-	// signal (Steam Input emulates an Xbox controller and the host
-	// process sees only generic gamepad events). Default 0x77 = VK_F8.
+	// Two runtime-toggle paths, both polled on the same background thread:
+	//
+	// LockGlyphsHotkey: Win32 virtual-key code, default 0x77 (VK_F8). On a
+	// rising edge, toggle g_lockControllerGlyphs and log.
+	//
+	// LockGlyphsChord: gamepad button mask + trigger flags (XInput).
+	// Default LB + RB + DPadDown, must be held continuously for
+	// LockGlyphsChordHoldMs (default 500 ms) to toggle. Held-then-toggled
+	// latches until released so we don't fire repeatedly. Built for
+	// Steam Remote Play / MoonDeck on Steam Deck where F-keys are
+	// awkward and stick-clicks (L3 / R3) need releasing the stick.
 	std::atomic<bool>    g_lockControllerGlyphs{ false };
 	std::atomic<int>     g_lockGlyphsHotkey{ 0x77 };  // VK_F8
+
+	// Default chord: LB (LEFT_SHOULDER 0x0100) + RB (RIGHT_SHOULDER 0x0200)
+	// + DPadDown (0x0002). Both shoulders are physical buttons on the Deck,
+	// DPadDown is reachable with the left thumb without losing the
+	// shoulders. LB+RB+anything is rare in default Starfield bindings.
+	std::atomic<unsigned> g_lockGlyphsChordButtons{ 0x0302 };
+	std::atomic<bool>     g_lockGlyphsChordLT{ false };
+	std::atomic<bool>     g_lockGlyphsChordRT{ false };
+	std::atomic<unsigned> g_lockGlyphsChordHoldMs{ 500 };
 }
 
 extern "C" DLLEXPORT constinit auto SFSEPlugin_Version = []() {
@@ -349,11 +369,103 @@ namespace
 		return defaultVk;
 	}
 
+	struct ChordSpec
+	{
+		unsigned buttons = 0;       // OR of XINPUT_GAMEPAD_* bits
+		bool     leftTrigger  = false;
+		bool     rightTrigger = false;
+		bool     valid = false;     // false if parse produced nothing usable
+		std::string repr;           // canonical "LB+RB+DPadDown" for logging
+	};
+
+	ChordSpec ParseChord(std::string_view raw)
+	{
+		ChordSpec out;
+		struct Token { std::string_view name; unsigned bits; bool isLT; bool isRT; };
+		// All XInput buttons + the two analog triggers as boolean flags.
+		// "Select" is an alias for "Back" (xbox vs ps naming).
+		static constexpr Token tokens[] = {
+			{ "lb",        0x0100, false, false },
+			{ "rb",        0x0200, false, false },
+			{ "lstick",    0x0040, false, false },
+			{ "rstick",    0x0080, false, false },
+			{ "a",         0x1000, false, false },
+			{ "b",         0x2000, false, false },
+			{ "x",         0x4000, false, false },
+			{ "y",         0x8000, false, false },
+			{ "dpadup",    0x0001, false, false },
+			{ "dpaddown",  0x0002, false, false },
+			{ "dpadleft",  0x0004, false, false },
+			{ "dpadright", 0x0008, false, false },
+			{ "start",     0x0010, false, false },
+			{ "back",      0x0020, false, false },
+			{ "select",    0x0020, false, false },
+			{ "lt",        0x0000, true,  false },
+			{ "rt",        0x0000, false, true  },
+		};
+
+		std::string_view rest = raw;
+		while (!rest.empty()) {
+			// Skip leading whitespace and chord separators (+, comma).
+			std::size_t i = 0;
+			while (i < rest.size() && (std::isspace(static_cast<unsigned char>(rest[i])) ||
+			                            rest[i] == '+' || rest[i] == ',')) {
+				++i;
+			}
+			rest.remove_prefix(i);
+			if (rest.empty()) {
+				break;
+			}
+			// Read until next separator.
+			std::size_t j = 0;
+			while (j < rest.size() && rest[j] != '+' && rest[j] != ',' &&
+			       !std::isspace(static_cast<unsigned char>(rest[j]))) {
+				++j;
+			}
+			const auto tok = ToLower(std::string(rest.substr(0, j)));
+			rest.remove_prefix(j);
+
+			bool matched = false;
+			for (const auto& t : tokens) {
+				if (tok == t.name) {
+					out.buttons |= t.bits;
+					out.leftTrigger  = out.leftTrigger  || t.isLT;
+					out.rightTrigger = out.rightTrigger || t.isRT;
+					if (!out.repr.empty()) {
+						out.repr += '+';
+					}
+					out.repr += tok;
+					matched = true;
+					break;
+				}
+			}
+			if (!matched) {
+				REX::WARN(
+					"config: unknown chord token '{}' in LockGlyphsChord; "
+					"valid tokens: LB RB LStick RStick A B X Y "
+					"DPadUp DPadDown DPadLeft DPadRight Start Back/Select LT RT",
+					tok);
+			}
+		}
+		out.valid = (out.buttons != 0) || out.leftTrigger || out.rightTrigger;
+		return out;
+	}
+
 	struct IniConfig
 	{
-		bool lockControllerGlyphs = false;
-		int  lockGlyphsHotkey     = 0x77;  // VK_F8
-		bool fileFound            = false;
+		bool      lockControllerGlyphs = false;
+		int       lockGlyphsHotkey     = 0x77;  // VK_F8
+		ChordSpec lockGlyphsChord;
+		unsigned  lockGlyphsChordHoldMs = 500;
+		bool      fileFound = false;
+
+		IniConfig()
+		{
+			// Default chord = LB + RB + DPadDown.
+			lockGlyphsChord.buttons = 0x0302;
+			lockGlyphsChord.valid = true;
+			lockGlyphsChord.repr = "lb+rb+dpaddown";
+		}
 	};
 
 	IniConfig LoadIniConfig(const std::string& path)
@@ -391,13 +503,39 @@ namespace
 					cfg.lockControllerGlyphs = ParseBool(val, cfg.lockControllerGlyphs);
 				} else if (key == "lockglyphshotkey") {
 					cfg.lockGlyphsHotkey = ParseHotkey(val, cfg.lockGlyphsHotkey);
+				} else if (key == "lockglyphschord") {
+					auto parsed = ParseChord(TrimWs(val));
+					if (parsed.valid) {
+						cfg.lockGlyphsChord = parsed;
+					}  // else keep default; ParseChord already logged unknown tokens
+				} else if (key == "lockglyphschordholdms") {
+					unsigned ms = 0;
+					const auto trimmed = TrimWs(val);
+					auto [p, ec] = std::from_chars(
+						trimmed.data(), trimmed.data() + trimmed.size(), ms);
+					if (ec == std::errc{} && ms >= 50 && ms <= 5000) {
+						cfg.lockGlyphsChordHoldMs = ms;
+					}
 				}
 			}
 		}
 		return cfg;
 	}
 
-	// Background poll for the runtime toggle hotkey.
+	void ToggleLockAndLog(const char* source, std::string_view detail)
+	{
+		const bool prev = g_lockControllerGlyphs.load(std::memory_order_relaxed);
+		const bool next = !prev;
+		g_lockControllerGlyphs.store(next, std::memory_order_relaxed);
+		REX::INFO(
+			"{}: LockControllerGlyphs toggled {} -> {} ({})",
+			source,
+			prev ? "true" : "false",
+			next ? "true" : "false",
+			detail);
+	}
+
+	// Background poll for both runtime toggles: KBM hotkey + gamepad chord.
 	//
 	// Polling vs. SetWindowsHookEx vs. RegisterHotKey: a low-level keyboard
 	// hook injects into every thread's input chain and adds latency to
@@ -405,29 +543,89 @@ namespace
 	// requires a message pump we don't otherwise need; polling on a
 	// detached thread is the smallest-diff option. 50 ms is below the
 	// human keypress floor (~100 ms) so we never miss a tap, and below
-	// 1% CPU on one core given GetAsyncKeyState is a thin syscall.
+	// 1% CPU on one core given GetAsyncKeyState and XInputGetState are
+	// thin syscalls.
 	//
-	// Edge detection on the high bit (0x8000) of GetAsyncKeyState gives us
+	// KBM edge detection: high bit (0x8000) of GetAsyncKeyState gives us
 	// "is key currently down" without latching on the low bit's "was
 	// pressed since last call" semantics, which would race with us if
 	// another caller inspects the same key.
+	//
+	// Gamepad chord: read XInput controller 0 (Steam Input always presents
+	// as controller 0; we don't iterate 1..3 because Tony only uses one).
+	// Chord is satisfied when ALL required buttons are down AND any
+	// required triggers are above XINPUT_GAMEPAD_TRIGGER_THRESHOLD (30).
+	// We track when the chord was first satisfied; once it has been held
+	// continuously for >= holdMs, we toggle and latch (no repeats until
+	// the chord is released). Releasing any required input resets the
+	// state machine.
 	void HotkeyPollLoop()
 	{
-		bool wasDown = false;
+		bool wasKeyDown = false;
+		bool chordWasSatisfied = false;
+		bool chordLatched = false;
+		unsigned long long chordSatisfiedAtMs = 0;
+
+		auto nowMs = []() -> unsigned long long {
+			return static_cast<unsigned long long>(::GetTickCount64());
+		};
+
 		for (;;) {
+			// === KBM hotkey ===
 			const int vk = g_lockGlyphsHotkey.load(std::memory_order_relaxed);
-			const bool isDown = (::GetAsyncKeyState(vk) & 0x8000) != 0;
-			if (isDown && !wasDown) {
-				const bool prev = g_lockControllerGlyphs.load(std::memory_order_relaxed);
-				const bool next = !prev;
-				g_lockControllerGlyphs.store(next, std::memory_order_relaxed);
-				REX::INFO(
-					"hotkey: LockControllerGlyphs toggled {} -> {} (vk=0x{:x})",
-					prev ? "true" : "false",
-					next ? "true" : "false",
-					static_cast<unsigned>(vk));
+			if (vk > 0) {
+				const bool isKeyDown = (::GetAsyncKeyState(vk) & 0x8000) != 0;
+				if (isKeyDown && !wasKeyDown) {
+					ToggleLockAndLog(
+						"hotkey",
+						std::string("vk=0x") +
+						[vk]() {
+							char b[8] = {};
+							auto [p, _] = std::to_chars(b, b + sizeof(b), vk, 16);
+							return std::string(b, p);
+						}());
+				}
+				wasKeyDown = isKeyDown;
 			}
-			wasDown = isDown;
+
+			// === Gamepad chord ===
+			const auto reqButtons = g_lockGlyphsChordButtons.load(std::memory_order_relaxed);
+			const bool reqLT = g_lockGlyphsChordLT.load(std::memory_order_relaxed);
+			const bool reqRT = g_lockGlyphsChordRT.load(std::memory_order_relaxed);
+			const auto holdMs = g_lockGlyphsChordHoldMs.load(std::memory_order_relaxed);
+
+			if (reqButtons != 0 || reqLT || reqRT) {
+				XINPUT_STATE state{};
+				const auto rc = ::XInputGetState(0, &state);
+				bool satisfied = false;
+				if (rc == ERROR_SUCCESS) {
+					const auto& gp = state.Gamepad;
+					const bool buttonsOk =
+						(reqButtons == 0) || ((gp.wButtons & reqButtons) == reqButtons);
+					const bool ltOk =
+						!reqLT || (gp.bLeftTrigger >= XINPUT_GAMEPAD_TRIGGER_THRESHOLD);
+					const bool rtOk =
+						!reqRT || (gp.bRightTrigger >= XINPUT_GAMEPAD_TRIGGER_THRESHOLD);
+					satisfied = buttonsOk && ltOk && rtOk;
+				}
+
+				if (satisfied) {
+					if (!chordWasSatisfied) {
+						chordSatisfiedAtMs = nowMs();
+						chordLatched = false;
+					}
+					if (!chordLatched && (nowMs() - chordSatisfiedAtMs) >= holdMs) {
+						std::string detail = "chord held " + std::to_string(holdMs) + "ms";
+						ToggleLockAndLog("chord", detail);
+						chordLatched = true;
+					}
+				} else {
+					chordSatisfiedAtMs = 0;
+					chordLatched = false;
+				}
+				chordWasSatisfied = satisfied;
+			}
+
 			::Sleep(50);
 		}
 	}
@@ -453,18 +651,29 @@ namespace
 		const auto cfg = LoadIniConfig(iniPath);
 		g_lockControllerGlyphs.store(cfg.lockControllerGlyphs, std::memory_order_relaxed);
 		g_lockGlyphsHotkey.store(cfg.lockGlyphsHotkey, std::memory_order_relaxed);
+		g_lockGlyphsChordButtons.store(cfg.lockGlyphsChord.buttons, std::memory_order_relaxed);
+		g_lockGlyphsChordLT.store(cfg.lockGlyphsChord.leftTrigger, std::memory_order_relaxed);
+		g_lockGlyphsChordRT.store(cfg.lockGlyphsChord.rightTrigger, std::memory_order_relaxed);
+		g_lockGlyphsChordHoldMs.store(cfg.lockGlyphsChordHoldMs, std::memory_order_relaxed);
 
 		if (!cfg.fileFound) {
 			REX::INFO(
 				"config: no INI at '{}'; using defaults "
-				"(LockControllerGlyphs=false, LockGlyphsHotkey=0x77 VK_F8)",
+				"(LockControllerGlyphs=false, LockGlyphsHotkey=VK_F8, "
+				"LockGlyphsChord=LB+RB+DPadDown, LockGlyphsChordHoldMs=500)",
 				iniPath);
 		} else {
 			REX::INFO(
-				"config: loaded '{}' (LockControllerGlyphs={}, LockGlyphsHotkey=0x{:x})",
+				"config: loaded '{}' (LockControllerGlyphs={}, LockGlyphsHotkey=0x{:x}, "
+				"LockGlyphsChord='{}' buttons=0x{:x} LT={} RT={}, LockGlyphsChordHoldMs={})",
 				iniPath,
 				cfg.lockControllerGlyphs ? "true" : "false",
-				static_cast<unsigned>(cfg.lockGlyphsHotkey));
+				static_cast<unsigned>(cfg.lockGlyphsHotkey),
+				cfg.lockGlyphsChord.repr,
+				cfg.lockGlyphsChord.buttons,
+				cfg.lockGlyphsChord.leftTrigger ? "true" : "false",
+				cfg.lockGlyphsChord.rightTrigger ? "true" : "false",
+				cfg.lockGlyphsChordHoldMs);
 		}
 
 		// Spawn detached poller. Lifetime is the game process; the thread
@@ -473,11 +682,14 @@ namespace
 		try {
 			std::thread(HotkeyPollLoop).detach();
 			REX::INFO(
-				"hotkey: registered runtime toggle on vk=0x{:x} (poll 50 ms)",
-				static_cast<unsigned>(cfg.lockGlyphsHotkey));
+				"hotkey/chord: registered runtime toggle (kbm vk=0x{:x}, "
+				"chord '{}', hold {} ms, poll 50 ms)",
+				static_cast<unsigned>(cfg.lockGlyphsHotkey),
+				cfg.lockGlyphsChord.repr,
+				cfg.lockGlyphsChordHoldMs);
 		} catch (const std::exception& ex) {
 			REX::WARN(
-				"hotkey: poller failed to start ({}); INI value still applies, "
+				"hotkey/chord: poller failed to start ({}); INI value still applies, "
 				"runtime toggle disabled",
 				ex.what());
 		}

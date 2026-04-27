@@ -165,20 +165,25 @@ need offset updates but the AL IDs should stay stable across minor patches.
 
 ## 8. Config: LockControllerGlyphs (v1.4.0+)
 
-`SimultaneousInput.ini` lives next to the DLL. Two keys, both optional;
-defaults preserve v1.3.0 behavior. `dist/SimultaneousInput.ini` is the
-template that ships in the install bundle.
+`SimultaneousInput.ini` lives next to the DLL. Four keys, all optional;
+in-source defaults preserve v1.3.0 behavior, the shipped
+`dist/SimultaneousInput.ini` template flips `LockControllerGlyphs` to
+`true` because that template is the one we ship for the streaming-host
+use case.
 
 ```ini
 [Display]
-LockControllerGlyphs = false   ; default; pin glyphs to gamepad branch when true
-LockGlyphsHotkey     = VK_F8   ; default; runtime toggle (Win32 VK code)
+LockControllerGlyphs   = false           ; default; pin glyphs to gamepad branch when true
+LockGlyphsHotkey       = VK_F8           ; runtime toggle via keyboard
+LockGlyphsChord        = LB+RB+DPadDown  ; runtime toggle via gamepad
+LockGlyphsChordHoldMs  = 500             ; clamped [50, 5000]
 ```
 
-The flag short-circuits `IsGamepadCursor()` (in `src/export/SFSEPlugin.cpp`)
-to always return `true`, which is what the trampolined call sites at
-`IMenu::ShowCursor +0xA1` and `UI::SetCursorStyle +0x4CE` invoke. The
-camera-side hooks (`LookHandler::Func10`, `ProcessLookInput`,
+The flag short-circuits `IsGamepadCursor()` (in
+`src/export/SFSEPlugin.cpp`) to always return `true`, which is what the
+trampolined call sites at `IMenu::ShowCursor +0xA1` and
+`UI::SetCursorStyle +0x4CE` invoke. The camera-side hooks
+(`LookHandler::Func10`, `ProcessLookInput`,
 `ShipHud::PerformInputProcessing`, plus the LookHandler vtable shim)
 still call `IsUsingThumbstickLook()` for their own decisions, so
 simultaneous mouse + gamepad camera control is unaffected.
@@ -194,44 +199,82 @@ in the streaming setup. If you want auto-behavior in some future
 Deck-native variant, add a separate detection path; do not assume the
 env var alone is sufficient.
 
-**Runtime toggle (hotkey):** the plugin spawns one detached background
-thread that polls `GetAsyncKeyState` every 50 ms on the configured VK.
-Rising-edge detection (was-up, now-down) flips `g_lockControllerGlyphs`
-and writes a `[I]` log entry. Polling is the smallest-diff option:
-`SetWindowsHookEx` adds latency to every keypress on every thread (game
-input gets penalized), and `RegisterHotKey` would force us to stand up a
-message pump. 50 ms is below the human-press floor and keeps the polling
-thread under 1% on one core (`GetAsyncKeyState` is a thin syscall).
+**Runtime toggles (hotkey + chord):** one detached background thread
+polls both signals every 50 ms.
 
-The thread is detached; SFSE plugins do not get a clean unload, so we
-let the process tear it down on game exit. There is no shutdown path or
-join.
+- KBM hotkey: `GetAsyncKeyState(vk) & 0x8000` for "currently down".
+  Rising-edge detection flips `g_lockControllerGlyphs` and writes a
+  `[I]` log line. Avoid `SetWindowsHookEx` (per-keypress latency on
+  every thread) and `RegisterHotKey` (forces a message pump).
+- Gamepad chord: `XInputGetState(0, &state)`. Steam Input always
+  presents as controller 0; we don't iterate 1..3 because Tony only
+  uses one controller. The chord is satisfied when ALL required
+  buttons are down AND any required triggers are above
+  `XINPUT_GAMEPAD_TRIGGER_THRESHOLD` (30 / 255 ~= 12%). We track when
+  the chord was first satisfied; once held continuously for >=
+  `LockGlyphsChordHoldMs`, we toggle and latch (no repeats until
+  released). Releasing any required input resets the state machine.
 
-**Hotkey value parsing** accepts a hex literal (`0x77`), a decimal
-(`119`), or one of a short list of named VK constants
-(`VK_F1..VK_F12`, `VK_PAUSE`, `VK_SCROLL`, `VK_NUMPAD0..9`, `VK_ADD`,
-`VK_SUBTRACT`, `VK_OEM_PLUS`, `VK_OEM_MINUS`, etc.). Full Win32 VK names
-table (200+ entries) is overkill; if you bind something exotic, drop in
-the hex.
+50 ms is below the human keypress floor and keeps the polling thread
+under 1% on one core (`GetAsyncKeyState` and `XInputGetState` are thin
+syscalls). The thread is detached; SFSE plugins do not get a clean
+unload, so we let the process tear it down on game exit.
+
+**Default chord rationale (LB+RB+DPadDown):** both shoulder buttons are
+physical on every standard pad including the Deck; DPadDown is reachable
+with the left thumb without losing the shoulders; the combination is
+not bound by default Starfield, so accidental triggers during play are
+unlikely. Earlier candidate `LStick+RStick` (L3+R3) was dropped because
+clicking both sticks requires releasing the sticks, which interrupts
+look. F-keys alone were dropped because the Deck has no native F-key
+input.
+
+**Chord token table** (case-insensitive, `+` or `,` separated):
+
+| Token        | XInput bit | Notes                              |
+|--------------|------------|------------------------------------|
+| `LB`         | 0x0100     | LEFT_SHOULDER                      |
+| `RB`         | 0x0200     | RIGHT_SHOULDER                     |
+| `LStick`     | 0x0040     | LEFT_THUMB (L3)                    |
+| `RStick`     | 0x0080     | RIGHT_THUMB (R3)                   |
+| `A`          | 0x1000     |                                    |
+| `B`          | 0x2000     |                                    |
+| `X`          | 0x4000     |                                    |
+| `Y`          | 0x8000     |                                    |
+| `DPadUp`     | 0x0001     |                                    |
+| `DPadDown`   | 0x0002     |                                    |
+| `DPadLeft`   | 0x0004     |                                    |
+| `DPadRight`  | 0x0008     |                                    |
+| `Start`      | 0x0010     |                                    |
+| `Back`       | 0x0020     | alias `Select`                     |
+| `LT`         | n/a        | analog, fires above threshold 30   |
+| `RT`         | n/a        | analog, fires above threshold 30   |
+
+Unknown tokens log a `[W]` warning and are skipped (parser keeps the
+known tokens; if zero tokens are recognized the chord stays at default).
 
 The plugin always logs the loaded INI path, the parsed values, and the
-hotkey registration. Look for two lines near the start of
+runtime-toggle registration. Look for two lines near the start of
 `SimultaneousInput.log`:
 
 ```
-config: loaded '<...>SimultaneousInput.ini' (LockControllerGlyphs=true, LockGlyphsHotkey=0x77)
-hotkey: registered runtime toggle on vk=0x77 (poll 50 ms)
+config: loaded '<...>SimultaneousInput.ini' (LockControllerGlyphs=true, LockGlyphsHotkey=0x77, LockGlyphsChord='lb+rb+dpaddown' buttons=0x302 LT=false RT=false, LockGlyphsChordHoldMs=500)
+hotkey/chord: registered runtime toggle (kbm vk=0x77, chord 'lb+rb+dpaddown', hold 500 ms, poll 50 ms)
 ```
 
-When you tap the hotkey in-game:
+When you fire either toggle in-game:
 
 ```
 hotkey: LockControllerGlyphs toggled false -> true (vk=0x77)
+chord:  LockControllerGlyphs toggled true -> false (chord held 500ms)
 ```
 
-The INI parser is hand-rolled (~80 LoC, no new vcpkg dep). Section + key
-matching is case-insensitive; bool values accept
-`true|false|1|0|yes|no|on|off`; `;` and `#` start comments anywhere on a
-line. If the plugin ever needs more than a handful of keys, swap the
-parser for inih or simpleini and keep the `IniConfig` struct shape so
-callers do not move.
+The INI parser is hand-rolled (~150 LoC including the chord parser, no
+new vcpkg dep). Section + key matching case-insensitive; bool values
+accept `true|false|1|0|yes|no|on|off`; `;` and `#` start comments
+anywhere on a line. If the plugin ever needs more than a handful of
+keys, swap the parser for inih or simpleini and keep the `IniConfig`
+struct shape so callers do not move.
+
+**Library link:** XInput is pulled in via `#pragma comment(lib,
+"Xinput.lib")` inside `SFSEPlugin.cpp`. No CMakeLists change needed.

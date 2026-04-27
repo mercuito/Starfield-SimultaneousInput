@@ -27,7 +27,7 @@ with the modding exceptions in [`EXCEPTIONS`](EXCEPTIONS).
 | 1.0.3          | f2ea130 (2023-11)  | 0.2.x early | 1.8.86                    | Original upstream build, last release by Parapets. |
 | 1.1.0          | 9caec20 (2025-09)  | 0.2.19+     | 1.14.70+ (target 1.15.x)  | This fork. Layout-bit moved to 1<<3 (1.14.70+).    |
 | 1.3.0          | libxse 9caec20+    | 0.2.19+     | 1.16.236                  | All 8 reachable hooks re-anchored. WindowsMessageLoop hook retired. |
-| 1.4.0          | libxse 9caec20+    | 0.2.19+     | 1.16.236                  | Adds `LockControllerGlyphs` INI flag + runtime hotkey toggle (default `VK_F8`). Hook table unchanged from 1.3.0. |
+| 1.4.0          | libxse 9caec20+    | 0.2.19+     | 1.16.236                  | Adds `LockControllerGlyphs` INI flag + runtime KBM hotkey (default `VK_F8`) + gamepad chord (default `LB+RB+DPadDown`, hold 500 ms). Hook table unchanged from 1.3.0. |
 
 The plugin uses Address Library v1 IDs to resolve engine functions at load
 time. As long as the AL database for your installed runtime maps the same IDs
@@ -78,13 +78,15 @@ Verify it loaded by checking
 
 ## Configuration (v1.4.0+)
 
-`SimultaneousInput.ini` lives next to the DLL. Two keys today, both under
-`[Display]`:
+`SimultaneousInput.ini` lives next to the DLL. Four keys, all optional,
+all under `[Display]`:
 
 ```ini
 [Display]
-LockControllerGlyphs = false
-LockGlyphsHotkey     = VK_F8
+LockControllerGlyphs   = false
+LockGlyphsHotkey       = VK_F8
+LockGlyphsChord        = LB+RB+DPadDown
+LockGlyphsChordHoldMs  = 500
 ```
 
 - **`LockControllerGlyphs`** (default `false`): when `true`, on-screen
@@ -95,33 +97,50 @@ LockGlyphsHotkey     = VK_F8
   streaming from a host PC to a Steam Deck or similar controller-form
   client: the host has no Deck-detection signal because Steam Input
   presents an emulated Xbox controller, so this manual switch is the
-  intended primary mechanism.
+  intended primary mechanism. The default INI shipped with the release
+  archive sets this to `true`; that copy is meant for the host PC. Set
+  to `false` for desktop installs that want v1.3.0 device-following
+  behavior.
 - **`LockGlyphsHotkey`** (default `VK_F8` = `0x77`): Win32 virtual-key
-  code that toggles the lock at runtime. Useful for testing or for
-  switching glyph styles between play sessions without editing the INI.
-  Press the key once to flip the state; the change takes effect on the
-  next cursor draw and is logged at `[I]` level. Accepts named VK
-  constants (`VK_F1`..`VK_F12`, `VK_PAUSE`, `VK_SCROLL`, `VK_NUMPAD0`..`9`,
-  `VK_ADD`, `VK_SUBTRACT`, `VK_OEM_PLUS`, `VK_OEM_MINUS`), hex literals
-  (`0x77`), or decimals (`119`). See `dist/SimultaneousInput.ini` for the
-  full annotated list.
+  code that toggles the lock at runtime via keyboard. Press once to flip
+  the state; takes effect on the next cursor draw, logged at `[I]`
+  level. Accepts named VK constants (`VK_F1`..`VK_F12`, `VK_PAUSE`,
+  `VK_SCROLL`, `VK_NUMPAD0`..`9`, `VK_ADD`, `VK_SUBTRACT`, `VK_OEM_PLUS`,
+  `VK_OEM_MINUS`), hex (`0x77`), or decimal (`119`). See
+  `dist/SimultaneousInput.ini` for the full annotated list.
+- **`LockGlyphsChord`** (default `LB+RB+DPadDown`): gamepad button
+  combination polled via XInput. Hold all listed inputs together for the
+  hold-time below to fire. The chord latches once toggled, so it will
+  not re-fire until at least one input is released. Token syntax is
+  case-insensitive `+` (or `,`)-joined names. Recognized tokens:
+  - **Buttons:** `LB`, `RB`, `LStick`, `RStick`, `A`, `B`, `X`, `Y`,
+    `DPadUp`, `DPadDown`, `DPadLeft`, `DPadRight`, `Start`, `Back`
+    (alias `Select`)
+  - **Triggers:** `LT`, `RT` (analog; fire above ~12% press)
 
-The plugin logs the loaded config and registers the hotkey at startup,
-e.g.:
+  The default `LB+RB+DPadDown` is comfortable on Steam Deck (both
+  shoulders + left thumb on DPad) and uncommon in default Starfield
+  bindings.
+- **`LockGlyphsChordHoldMs`** (default `500`, clamped to `[50, 5000]`):
+  how long the chord must be held continuously before it fires.
+
+The plugin logs the loaded config and registers both runtime toggles at
+startup, e.g.:
 
 ```
-config: loaded '...\SimultaneousInput.ini' (LockControllerGlyphs=true, LockGlyphsHotkey=0x77)
-hotkey: registered runtime toggle on vk=0x77 (poll 50 ms)
+config: loaded '...\SimultaneousInput.ini' (LockControllerGlyphs=true, LockGlyphsHotkey=0x77, LockGlyphsChord='lb+rb+dpaddown' buttons=0x302 LT=false RT=false, LockGlyphsChordHoldMs=500)
+hotkey/chord: registered runtime toggle (kbm vk=0x77, chord 'lb+rb+dpaddown', hold 500 ms, poll 50 ms)
 ```
 
-When you press the hotkey in-game:
+When you fire either toggle in-game:
 
 ```
 hotkey: LockControllerGlyphs toggled false -> true (vk=0x77)
+chord: LockControllerGlyphs toggled true -> false (chord held 500ms)
 ```
 
-If no INI is found the plugin uses defaults (`LockControllerGlyphs=false`,
-`LockGlyphsHotkey=0x77` VK_F8) and logs that it fell through.
+If no INI is found the plugin uses the defaults above (with
+`LockControllerGlyphs=false`) and logs that it fell through.
 
 ## Sanity-test checklist
 
