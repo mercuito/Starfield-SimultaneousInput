@@ -49,6 +49,20 @@
 #include <xinput.h>
 #pragma comment(lib, "Xinput.lib")
 
+// Belt-and-suspenders: even with NOMINMAX hoisted to the very top of
+// the file, libxse / SFSE pull in spdlog and std::format support that
+// processes <Windows.h> internally with its own header guards in ways
+// that have historically left min/max defined in some MSVC + libxse
+// combinations. Force-clean here so downstream uses of
+// std::numeric_limits<X>::max() in the REX::INFO / REX::WARN / REX::ERROR
+// std::format expansions compile cleanly. Cheap and idempotent.
+#ifdef min
+#  undef min
+#endif
+#ifdef max
+#  undef max
+#endif
+
 using namespace std::string_view_literals;
 
 #define DLLEXPORT __declspec(dllexport)
