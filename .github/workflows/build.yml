@@ -54,5 +54,6 @@ jobs:
           path: |
             build/RelWithDebInfo/SimultaneousInput.dll
             build/RelWithDebInfo/SimultaneousInput.pdb
+            dist/SimultaneousInput.ini
           if-no-files-found: error
           retention-days: 30

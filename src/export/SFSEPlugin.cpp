@@ -15,9 +15,16 @@
 #include "RE/B/BSInputEventUser.h"
 
 #include <atomic>
+#include <cctype>
+#include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <source_location>
+#include <string>
+#include <string_view>
 #include <utility>
+
+#include <windows.h>
 
 using namespace std::string_view_literals;
 
@@ -31,6 +38,24 @@ namespace
 	// debugger).
 	std::atomic<unsigned> g_hooksInstalled{ 0 };
 	std::atomic<unsigned> g_hooksSkipped{ 0 };
+
+	// === Runtime configuration (SimultaneousInput.ini) ===
+	//
+	// LockControllerGlyphs: when true, IsGamepadCursor() always returns true
+	// regardless of which device drove the most recent look event. The
+	// camera-side simultaneous-input behavior is unchanged (mouse and gamepad
+	// both still drive the camera). Default false to preserve legacy behavior
+	// for desktop users.
+	//
+	// AutoDetectSteamDeck: when true and the SteamDeck=1 environment variable
+	// is present (Steam sets this on Deck regardless of OS path), force
+	// LockControllerGlyphs to true. Steam Deck's trackpad and gyro register as
+	// mouse input, which under v1.3.0 toggles glyphs to the mouse style on a
+	// device with no actual mouse, breaking the on-screen prompt UX. The
+	// auto-detect makes the right thing happen out of the box.
+	std::atomic<bool> g_lockControllerGlyphs{ false };
+	std::atomic<bool> g_autoDetectSteamDeck{ true };
+	std::atomic<bool> g_steamDeckDetected{ false };
 }
 
 extern "C" DLLEXPORT constinit auto SFSEPlugin_Version = []() {
@@ -110,8 +135,16 @@ bool IsUsingThumbstickLook(RE::BSInputDeviceManager*)
 // rules only when both (a) we're in thumbstick-look mode and (b) gamepad is
 // the currently-held active device. Mouse + gamepad held simultaneously falls
 // through to mouse cursor handling.
+//
+// Override: if the LockControllerGlyphs config flag is set (or auto-detected
+// on Steam Deck), this always returns true so the gamepad glyph branch is
+// always taken. The camera-side hooks still call IsUsingThumbstickLook for
+// their own decisions; only the cursor/glyph display is pinned.
 bool IsGamepadCursor(RE::BSInputDeviceManager* a_inputDeviceManager)
 {
+	if (g_lockControllerGlyphs.load(std::memory_order_relaxed)) {
+		return true;
+	}
 	return UsingThumbstickLook && IsUsingGamepad(a_inputDeviceManager);
 }
 
@@ -197,6 +230,170 @@ namespace
 				knownLatest.string("."sv));
 		}
 	}
+
+	// === Tiny single-file INI parser ===
+	//
+	// Supports:
+	//   [Section]
+	//   key = value     ; comment after value is also stripped
+	//   ; or # full-line comment
+	//
+	// Section + key matching is case-insensitive. Bool values accept
+	// true/false, 1/0, yes/no, on/off (any case). Whitespace around the =
+	// and at line ends is trimmed.
+	//
+	// Hand-rolled to avoid pulling in a vcpkg dependency for ~20 LoC of
+	// parsing. The plugin's only config surface is the [Display] section
+	// today; if it grows past a handful of keys, swap this for inih or
+	// simpleini.
+	std::string TrimWs(std::string_view s)
+	{
+		std::size_t b = 0;
+		while (b < s.size() && std::isspace(static_cast<unsigned char>(s[b]))) {
+			++b;
+		}
+		std::size_t e = s.size();
+		while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) {
+			--e;
+		}
+		return std::string(s.substr(b, e - b));
+	}
+
+	std::string ToLower(std::string_view s)
+	{
+		std::string out;
+		out.reserve(s.size());
+		for (char c : s) {
+			out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+		}
+		return out;
+	}
+
+	bool ParseBool(std::string_view raw, bool defaultValue)
+	{
+		const auto v = ToLower(TrimWs(raw));
+		if (v == "true" || v == "1" || v == "yes" || v == "on") {
+			return true;
+		}
+		if (v == "false" || v == "0" || v == "no" || v == "off") {
+			return false;
+		}
+		return defaultValue;
+	}
+
+	struct IniConfig
+	{
+		bool lockControllerGlyphs = false;
+		bool autoDetectSteamDeck  = true;
+		bool fileFound            = false;
+	};
+
+	IniConfig LoadIniConfig(const std::string& path)
+	{
+		IniConfig cfg;
+		std::ifstream in(path);
+		if (!in) {
+			return cfg;
+		}
+		cfg.fileFound = true;
+		std::string line;
+		std::string section;
+		while (std::getline(in, line)) {
+			auto trimmed = TrimWs(line);
+			if (trimmed.empty() || trimmed[0] == ';' || trimmed[0] == '#') {
+				continue;
+			}
+			if (trimmed.front() == '[' && trimmed.back() == ']') {
+				section = ToLower(trimmed.substr(1, trimmed.size() - 2));
+				continue;
+			}
+			const auto eq = trimmed.find('=');
+			if (eq == std::string::npos) {
+				continue;
+			}
+			auto key = ToLower(TrimWs(std::string_view(trimmed).substr(0, eq)));
+			auto val = std::string_view(trimmed).substr(eq + 1);
+			// Strip inline ';' / '#' comments from the value.
+			const auto cmt = val.find_first_of(";#");
+			if (cmt != std::string_view::npos) {
+				val = val.substr(0, cmt);
+			}
+			if (section == "display") {
+				if (key == "lockcontrollerglyphs") {
+					cfg.lockControllerGlyphs = ParseBool(val, cfg.lockControllerGlyphs);
+				} else if (key == "autodetectsteamdeck") {
+					cfg.autoDetectSteamDeck = ParseBool(val, cfg.autoDetectSteamDeck);
+				}
+			}
+		}
+		return cfg;
+	}
+
+	bool DetectSteamDeck()
+	{
+		// Steam sets SteamDeck=1 in the game process environment when launched
+		// from a Deck (or from Big Picture in Deck UI mode). The game runs
+		// under Proton on Deck so the Windows-side process inherits the env
+		// Steam sets. GetEnvironmentVariableA returns 0 + last-error
+		// ERROR_ENVVAR_NOT_FOUND when the var is unset; otherwise the buffer
+		// holds the value.
+		char buf[8] = {};
+		const auto n = ::GetEnvironmentVariableA("SteamDeck", buf, sizeof(buf));
+		if (n == 0 || n >= sizeof(buf)) {
+			return false;
+		}
+		return buf[0] == '1';
+	}
+
+	void LoadConfig(const SFSE::LoadInterface*)
+	{
+		// Plugin runs from <Starfield>\Data\SFSE\Plugins\SimultaneousInput.dll;
+		// the INI sits next to the DLL so the Plugins directory remains the
+		// single source of truth for installed plugin state.
+		char dllPath[MAX_PATH] = {};
+		HMODULE thisModule = nullptr;
+		::GetModuleHandleExA(
+			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			reinterpret_cast<LPCSTR>(&LoadConfig),
+			&thisModule);
+		const auto pathLen = ::GetModuleFileNameA(thisModule, dllPath, MAX_PATH);
+		std::string iniPath;
+		if (pathLen > 4 && pathLen < MAX_PATH) {
+			iniPath.assign(dllPath, pathLen - 4);  // strip .dll
+			iniPath += ".ini";
+		}
+
+		const auto cfg = LoadIniConfig(iniPath);
+		const bool deckDetected = DetectSteamDeck();
+		g_steamDeckDetected.store(deckDetected, std::memory_order_relaxed);
+		g_autoDetectSteamDeck.store(cfg.autoDetectSteamDeck, std::memory_order_relaxed);
+
+		bool effectiveLock = cfg.lockControllerGlyphs;
+		const char* source = cfg.fileFound ? "ini" : "default";
+		if (cfg.autoDetectSteamDeck && deckDetected) {
+			effectiveLock = true;
+			source = "steamdeck-autodetect";
+		}
+		g_lockControllerGlyphs.store(effectiveLock, std::memory_order_relaxed);
+
+		if (!cfg.fileFound) {
+			REX::INFO(
+				"config: no INI at '{}'; using defaults "
+				"(LockControllerGlyphs=false, AutoDetectSteamDeck=true)",
+				iniPath);
+		} else {
+			REX::INFO(
+				"config: loaded '{}' (LockControllerGlyphs={}, AutoDetectSteamDeck={})",
+				iniPath,
+				cfg.lockControllerGlyphs ? "true" : "false",
+				cfg.autoDetectSteamDeck ? "true" : "false");
+		}
+		REX::INFO(
+			"config: SteamDeck env detected={}, effective LockControllerGlyphs={} (source: {})",
+			deckDetected ? "true" : "false",
+			effectiveLock ? "true" : "false",
+			source);
+	}
 }
 
 extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_sfse)
@@ -222,6 +419,12 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 		.trampolineSize = 32,
 	});
 	LogRuntimeProbe(a_sfse);
+
+	// Read SimultaneousInput.ini next to the DLL and apply the
+	// LockControllerGlyphs override (auto-detect on Steam Deck if enabled).
+	// Must run before any cursor hook fires so IsGamepadCursor sees the
+	// final flag state on its first invocation.
+	LoadConfig(a_sfse);
 
 	// === Vtable shim: split look input by event type ===
 	// LookHandler vtable slot 1 is the per-event handler. We replace it with a

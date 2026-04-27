@@ -26,6 +26,8 @@ with the modding exceptions in [`EXCEPTIONS`](EXCEPTIONS).
 | -------------- | ------------------ | ----------- | ------------------------- | -------------------------------------------------- |
 | 1.0.3          | f2ea130 (2023-11)  | 0.2.x early | 1.8.86                    | Original upstream build, last release by Parapets. |
 | 1.1.0          | 9caec20 (2025-09)  | 0.2.19+     | 1.14.70+ (target 1.15.x)  | This fork. Layout-bit moved to 1<<3 (1.14.70+).    |
+| 1.3.0          | libxse 9caec20+    | 0.2.19+     | 1.16.236                  | All 8 reachable hooks re-anchored. WindowsMessageLoop hook retired. |
+| 1.4.0          | libxse 9caec20+    | 0.2.19+     | 1.16.236                  | Adds `LockControllerGlyphs` config + Steam Deck auto-detect. Hook table unchanged from 1.3.0. |
 
 The plugin uses Address Library v1 IDs to resolve engine functions at load
 time. As long as the AL database for your installed runtime maps the same IDs
@@ -62,8 +64,8 @@ to it is required to symbolicate any minidumps.
 
 ## Deploy
 
-Drop `SimultaneousInput.dll` (and ideally `SimultaneousInput.pdb` for crash
-diagnosis) into:
+Drop `SimultaneousInput.dll`, `SimultaneousInput.pdb` (for crash diagnosis),
+and `SimultaneousInput.ini` (for the v1.4.0 LockControllerGlyphs config) into:
 
 ```
 <Starfield install>\Data\SFSE\Plugins\
@@ -71,8 +73,42 @@ diagnosis) into:
 
 Verify it loaded by checking
 `Documents\My Games\Starfield\SFSE\Logs\sfse.log` for a line like
-`SimultaneousInput.dll v1.1.0.0 loaded` and the plugin's own log file
+`SimultaneousInput.dll v1.4.0.0 loaded` and the plugin's own log file
 `SimultaneousInput.log` for the runtime probe and per-hook install lines.
+
+## Configuration (v1.4.0+)
+
+`SimultaneousInput.ini` lives next to the DLL. Two keys today, both under
+`[Display]`:
+
+```ini
+[Display]
+LockControllerGlyphs = false
+AutoDetectSteamDeck  = true
+```
+
+- **`LockControllerGlyphs`** (default `false`): when `true`, on-screen glyphs
+  and the cursor style stay pinned to the gamepad branch regardless of which
+  device drove the most recent look event. The camera-side simultaneous-input
+  feature is unaffected: mouse and gamepad both still drive the camera.
+  Useful on Steam Deck (where trackpad and gyro register as mouse input and
+  would otherwise flip glyphs to mouse style mid-play) and on couch setups
+  with a real mouse plugged in alongside a controller.
+- **`AutoDetectSteamDeck`** (default `true`): when Steam sets the
+  `SteamDeck=1` environment variable in the game process (it does this on
+  Deck and in Big Picture / Deck UI mode), force `LockControllerGlyphs` to
+  `true` even if the value above is `false`. Set to `false` to disable the
+  override.
+
+The plugin logs the loaded config and effective state at startup, e.g.:
+
+```
+config: loaded '...\SimultaneousInput.ini' (LockControllerGlyphs=false, AutoDetectSteamDeck=true)
+config: SteamDeck env detected=true, effective LockControllerGlyphs=true (source: steamdeck-autodetect)
+```
+
+If no INI is found the plugin uses defaults (`LockControllerGlyphs=false`,
+`AutoDetectSteamDeck=true`) and logs that it fell through.
 
 ## Sanity-test checklist
 

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.30)
 
 project(
 	SimultaneousInput
-	VERSION 1.3.0
+	VERSION 1.4.0
 	LANGUAGES CXX
 )
 
@@ -175,6 +175,7 @@ install(
 	FILES
 	"$<TARGET_FILE:${PROJECT_NAME}>"
 	"$<TARGET_PDB_FILE:${PROJECT_NAME}>"
+	"${CMAKE_CURRENT_SOURCE_DIR}/dist/SimultaneousInput.ini"
 	DESTINATION "SFSE/Plugins"
 	COMPONENT SFSEPlugin
 )

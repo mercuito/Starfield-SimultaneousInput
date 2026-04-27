@@ -162,3 +162,49 @@ If a future patch shifts these offsets again, re-run
 and re-derive against the resulting `derived_<ver>.json`. The byte-pattern
 scan for BSPCGamepadDevice::Poll is the most resilient pattern; the others
 need offset updates but the AL IDs should stay stable across minor patches.
+
+## 8. Config: LockControllerGlyphs (v1.4.0+)
+
+`SimultaneousInput.ini` lives next to the DLL. Two keys, both optional;
+defaults preserve v1.3.0 behavior on desktop and switch to locked glyphs on
+Steam Deck.
+
+```ini
+[Display]
+LockControllerGlyphs = false   ; default; pin glyphs to gamepad branch when true
+AutoDetectSteamDeck  = true    ; default; force-true on Deck via SteamDeck=1 env
+```
+
+The flag short-circuits `IsGamepadCursor()` (in `src/export/SFSEPlugin.cpp`)
+to always return `true`, which is what the trampolined call sites at
+`IMenu::ShowCursor +0xA1` and `UI::SetCursorStyle +0x4CE` invoke. The
+camera-side hooks (`LookHandler::Func10`, `ProcessLookInput`,
+`ShipHud::PerformInputProcessing`, plus the LookHandler vtable shim) still
+call `IsUsingThumbstickLook()` for their own decisions, so simultaneous
+mouse + gamepad camera control is unaffected.
+
+Steam Deck detection reads the `SteamDeck` environment variable via
+`GetEnvironmentVariableA`. Steam injects `SteamDeck=1` into the game
+process on Deck (and in the Deck UI / Big Picture mode); the game runs
+under Proton, so the Windows-side process inherits the env. The
+auto-detect runs unconditionally at plugin load, but only flips the
+effective state when `AutoDetectSteamDeck=true` (the default).
+
+The plugin always logs the loaded INI path, the parsed values, the
+detected env state, and the effective post-override flag with its source.
+Look for two lines near the start of `SimultaneousInput.log`:
+
+```
+config: loaded '<...>SimultaneousInput.ini' (LockControllerGlyphs=false, AutoDetectSteamDeck=true)
+config: SteamDeck env detected=true, effective LockControllerGlyphs=true (source: steamdeck-autodetect)
+```
+
+If you change behavior on a deployment, those two lines tell you what the
+plugin actually did.
+
+The INI parser is hand-rolled (~50 LoC, no new vcpkg dep). Section + key
+matching is case-insensitive; bool values accept
+`true|false|1|0|yes|no|on|off`; `;` and `#` start comments anywhere on a
+line. If the plugin ever needs more than a handful of keys, swap the
+parser for inih or simpleini and keep the same `IniConfig` struct shape
+so callers do not move.
