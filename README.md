@@ -27,7 +27,7 @@ with the modding exceptions in [`EXCEPTIONS`](EXCEPTIONS).
 | 1.0.3          | f2ea130 (2023-11)  | 0.2.x early | 1.8.86                    | Original upstream build, last release by Parapets. |
 | 1.1.0          | 9caec20 (2025-09)  | 0.2.19+     | 1.14.70+ (target 1.15.x)  | This fork. Layout-bit moved to 1<<3 (1.14.70+).    |
 | 1.3.0          | libxse 9caec20+    | 0.2.19+     | 1.16.236                  | All 8 reachable hooks re-anchored. WindowsMessageLoop hook retired. |
-| 1.4.0          | libxse 9caec20+    | 0.2.19+     | 1.16.236                  | Adds `LockControllerGlyphs` config + Steam Deck auto-detect. Hook table unchanged from 1.3.0. |
+| 1.4.0          | libxse 9caec20+    | 0.2.19+     | 1.16.236                  | Adds `LockControllerGlyphs` INI flag + runtime hotkey toggle (default `VK_F8`). Hook table unchanged from 1.3.0. |
 
 The plugin uses Address Library v1 IDs to resolve engine functions at load
 time. As long as the AL database for your installed runtime maps the same IDs
@@ -84,31 +84,44 @@ Verify it loaded by checking
 ```ini
 [Display]
 LockControllerGlyphs = false
-AutoDetectSteamDeck  = true
+LockGlyphsHotkey     = VK_F8
 ```
 
-- **`LockControllerGlyphs`** (default `false`): when `true`, on-screen glyphs
-  and the cursor style stay pinned to the gamepad branch regardless of which
-  device drove the most recent look event. The camera-side simultaneous-input
-  feature is unaffected: mouse and gamepad both still drive the camera.
-  Useful on Steam Deck (where trackpad and gyro register as mouse input and
-  would otherwise flip glyphs to mouse style mid-play) and on couch setups
-  with a real mouse plugged in alongside a controller.
-- **`AutoDetectSteamDeck`** (default `true`): when Steam sets the
-  `SteamDeck=1` environment variable in the game process (it does this on
-  Deck and in Big Picture / Deck UI mode), force `LockControllerGlyphs` to
-  `true` even if the value above is `false`. Set to `false` to disable the
-  override.
+- **`LockControllerGlyphs`** (default `false`): when `true`, on-screen
+  glyphs and the cursor style stay pinned to the gamepad branch regardless
+  of which device drove the most recent look event. The camera-side
+  simultaneous-input feature is unaffected: mouse and gamepad both still
+  drive the camera. Recommended for Steam Remote Play / MoonDeck setups
+  streaming from a host PC to a Steam Deck or similar controller-form
+  client: the host has no Deck-detection signal because Steam Input
+  presents an emulated Xbox controller, so this manual switch is the
+  intended primary mechanism.
+- **`LockGlyphsHotkey`** (default `VK_F8` = `0x77`): Win32 virtual-key
+  code that toggles the lock at runtime. Useful for testing or for
+  switching glyph styles between play sessions without editing the INI.
+  Press the key once to flip the state; the change takes effect on the
+  next cursor draw and is logged at `[I]` level. Accepts named VK
+  constants (`VK_F1`..`VK_F12`, `VK_PAUSE`, `VK_SCROLL`, `VK_NUMPAD0`..`9`,
+  `VK_ADD`, `VK_SUBTRACT`, `VK_OEM_PLUS`, `VK_OEM_MINUS`), hex literals
+  (`0x77`), or decimals (`119`). See `dist/SimultaneousInput.ini` for the
+  full annotated list.
 
-The plugin logs the loaded config and effective state at startup, e.g.:
+The plugin logs the loaded config and registers the hotkey at startup,
+e.g.:
 
 ```
-config: loaded '...\SimultaneousInput.ini' (LockControllerGlyphs=false, AutoDetectSteamDeck=true)
-config: SteamDeck env detected=true, effective LockControllerGlyphs=true (source: steamdeck-autodetect)
+config: loaded '...\SimultaneousInput.ini' (LockControllerGlyphs=true, LockGlyphsHotkey=0x77)
+hotkey: registered runtime toggle on vk=0x77 (poll 50 ms)
+```
+
+When you press the hotkey in-game:
+
+```
+hotkey: LockControllerGlyphs toggled false -> true (vk=0x77)
 ```
 
 If no INI is found the plugin uses defaults (`LockControllerGlyphs=false`,
-`AutoDetectSteamDeck=true`) and logs that it fell through.
+`LockGlyphsHotkey=0x77` VK_F8) and logs that it fell through.
 
 ## Sanity-test checklist
 

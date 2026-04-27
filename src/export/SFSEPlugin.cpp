@@ -16,14 +16,30 @@
 
 #include <atomic>
 #include <cctype>
+#include <charconv>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <fstream>
 #include <source_location>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 
+// Bring in windows.h ONLY for the small set of Win32 calls the config
+// loader and hotkey thread need (GetModuleHandleExA, GetModuleFileNameA,
+// GetAsyncKeyState, Sleep, MAX_PATH, HMODULE). NOMINMAX and
+// WIN32_LEAN_AND_MEAN keep `min` / `max` macros and the COM / GDI / RPC
+// surface from leaking into spdlog and std::format templates. The libxse
+// headers above use REX::W32 wrappers and never include windows.h
+// directly, so this is the first include and the macro guards take.
+#ifndef NOMINMAX
+#  define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 
 using namespace std::string_view_literals;
@@ -47,15 +63,15 @@ namespace
 	// both still drive the camera). Default false to preserve legacy behavior
 	// for desktop users.
 	//
-	// AutoDetectSteamDeck: when true and the SteamDeck=1 environment variable
-	// is present (Steam sets this on Deck regardless of OS path), force
-	// LockControllerGlyphs to true. Steam Deck's trackpad and gyro register as
-	// mouse input, which under v1.3.0 toggles glyphs to the mouse style on a
-	// device with no actual mouse, breaking the on-screen prompt UX. The
-	// auto-detect makes the right thing happen out of the box.
-	std::atomic<bool> g_lockControllerGlyphs{ false };
-	std::atomic<bool> g_autoDetectSteamDeck{ true };
-	std::atomic<bool> g_steamDeckDetected{ false };
+	// LockGlyphsHotkey: Win32 virtual-key code polled by a low-priority
+	// background thread. On a rising edge (key transitioned from up to
+	// down), the hotkey toggles g_lockControllerGlyphs and logs the new
+	// state. Useful for testing on a desktop and for Tony's Steam Remote
+	// Play / MoonDeck workflow, where the host PC has no Deck-detection
+	// signal (Steam Input emulates an Xbox controller and the host
+	// process sees only generic gamepad events). Default 0x77 = VK_F8.
+	std::atomic<bool>    g_lockControllerGlyphs{ false };
+	std::atomic<int>     g_lockGlyphsHotkey{ 0x77 };  // VK_F8
 }
 
 extern "C" DLLEXPORT constinit auto SFSEPlugin_Version = []() {
@@ -281,10 +297,62 @@ namespace
 		return defaultValue;
 	}
 
+	int ParseHotkey(std::string_view raw, int defaultVk)
+	{
+		auto v = TrimWs(raw);
+		if (v.empty()) {
+			return defaultVk;
+		}
+		// Accept either a hex literal (0x77), a decimal (119), or one of a
+		// short list of common Win32 VK names. The full VK table has 200+
+		// entries; we surface the keys someone is likely to bind without
+		// pulling in a name-resolution library.
+		const auto lower = ToLower(v);
+		struct Named { std::string_view name; int vk; };
+		static constexpr Named names[] = {
+			{ "vk_f1",  0x70 }, { "vk_f2",  0x71 }, { "vk_f3",  0x72 },
+			{ "vk_f4",  0x73 }, { "vk_f5",  0x74 }, { "vk_f6",  0x75 },
+			{ "vk_f7",  0x76 }, { "vk_f8",  0x77 }, { "vk_f9",  0x78 },
+			{ "vk_f10", 0x79 }, { "vk_f11", 0x7A }, { "vk_f12", 0x7B },
+			{ "vk_pause",      0x13 },
+			{ "vk_scroll",     0x91 },
+			{ "vk_oem_plus",   0xBB },
+			{ "vk_oem_minus",  0xBD },
+			{ "vk_add",        0x6B },
+			{ "vk_subtract",   0x6D },
+			{ "vk_multiply",   0x6A },
+			{ "vk_divide",     0x6F },
+			{ "vk_numpad0",    0x60 }, { "vk_numpad1", 0x61 },
+			{ "vk_numpad2",    0x62 }, { "vk_numpad3", 0x63 },
+			{ "vk_numpad4",    0x64 }, { "vk_numpad5", 0x65 },
+			{ "vk_numpad6",    0x66 }, { "vk_numpad7", 0x67 },
+			{ "vk_numpad8",    0x68 }, { "vk_numpad9", 0x69 },
+		};
+		for (const auto& e : names) {
+			if (lower == e.name) {
+				return e.vk;
+			}
+		}
+		// Numeric: hex or decimal.
+		int parsed = 0;
+		const char* begin = v.data();
+		const char* end = v.data() + v.size();
+		auto base = 10;
+		if (v.size() >= 2 && v[0] == '0' && (v[1] == 'x' || v[1] == 'X')) {
+			begin += 2;
+			base = 16;
+		}
+		auto [ptr, ec] = std::from_chars(begin, end, parsed, base);
+		if (ec == std::errc{} && parsed > 0 && parsed < 0x100) {
+			return parsed;
+		}
+		return defaultVk;
+	}
+
 	struct IniConfig
 	{
 		bool lockControllerGlyphs = false;
-		bool autoDetectSteamDeck  = true;
+		int  lockGlyphsHotkey     = 0x77;  // VK_F8
 		bool fileFound            = false;
 	};
 
@@ -321,28 +389,47 @@ namespace
 			if (section == "display") {
 				if (key == "lockcontrollerglyphs") {
 					cfg.lockControllerGlyphs = ParseBool(val, cfg.lockControllerGlyphs);
-				} else if (key == "autodetectsteamdeck") {
-					cfg.autoDetectSteamDeck = ParseBool(val, cfg.autoDetectSteamDeck);
+				} else if (key == "lockglyphshotkey") {
+					cfg.lockGlyphsHotkey = ParseHotkey(val, cfg.lockGlyphsHotkey);
 				}
 			}
 		}
 		return cfg;
 	}
 
-	bool DetectSteamDeck()
+	// Background poll for the runtime toggle hotkey.
+	//
+	// Polling vs. SetWindowsHookEx vs. RegisterHotKey: a low-level keyboard
+	// hook injects into every thread's input chain and adds latency to
+	// every keypress, which is unacceptable for a game; RegisterHotKey
+	// requires a message pump we don't otherwise need; polling on a
+	// detached thread is the smallest-diff option. 50 ms is below the
+	// human keypress floor (~100 ms) so we never miss a tap, and below
+	// 1% CPU on one core given GetAsyncKeyState is a thin syscall.
+	//
+	// Edge detection on the high bit (0x8000) of GetAsyncKeyState gives us
+	// "is key currently down" without latching on the low bit's "was
+	// pressed since last call" semantics, which would race with us if
+	// another caller inspects the same key.
+	void HotkeyPollLoop()
 	{
-		// Steam sets SteamDeck=1 in the game process environment when launched
-		// from a Deck (or from Big Picture in Deck UI mode). The game runs
-		// under Proton on Deck so the Windows-side process inherits the env
-		// Steam sets. GetEnvironmentVariableA returns 0 + last-error
-		// ERROR_ENVVAR_NOT_FOUND when the var is unset; otherwise the buffer
-		// holds the value.
-		char buf[8] = {};
-		const auto n = ::GetEnvironmentVariableA("SteamDeck", buf, sizeof(buf));
-		if (n == 0 || n >= sizeof(buf)) {
-			return false;
+		bool wasDown = false;
+		for (;;) {
+			const int vk = g_lockGlyphsHotkey.load(std::memory_order_relaxed);
+			const bool isDown = (::GetAsyncKeyState(vk) & 0x8000) != 0;
+			if (isDown && !wasDown) {
+				const bool prev = g_lockControllerGlyphs.load(std::memory_order_relaxed);
+				const bool next = !prev;
+				g_lockControllerGlyphs.store(next, std::memory_order_relaxed);
+				REX::INFO(
+					"hotkey: LockControllerGlyphs toggled {} -> {} (vk=0x{:x})",
+					prev ? "true" : "false",
+					next ? "true" : "false",
+					static_cast<unsigned>(vk));
+			}
+			wasDown = isDown;
+			::Sleep(50);
 		}
-		return buf[0] == '1';
 	}
 
 	void LoadConfig(const SFSE::LoadInterface*)
@@ -364,35 +451,36 @@ namespace
 		}
 
 		const auto cfg = LoadIniConfig(iniPath);
-		const bool deckDetected = DetectSteamDeck();
-		g_steamDeckDetected.store(deckDetected, std::memory_order_relaxed);
-		g_autoDetectSteamDeck.store(cfg.autoDetectSteamDeck, std::memory_order_relaxed);
-
-		bool effectiveLock = cfg.lockControllerGlyphs;
-		const char* source = cfg.fileFound ? "ini" : "default";
-		if (cfg.autoDetectSteamDeck && deckDetected) {
-			effectiveLock = true;
-			source = "steamdeck-autodetect";
-		}
-		g_lockControllerGlyphs.store(effectiveLock, std::memory_order_relaxed);
+		g_lockControllerGlyphs.store(cfg.lockControllerGlyphs, std::memory_order_relaxed);
+		g_lockGlyphsHotkey.store(cfg.lockGlyphsHotkey, std::memory_order_relaxed);
 
 		if (!cfg.fileFound) {
 			REX::INFO(
 				"config: no INI at '{}'; using defaults "
-				"(LockControllerGlyphs=false, AutoDetectSteamDeck=true)",
+				"(LockControllerGlyphs=false, LockGlyphsHotkey=0x77 VK_F8)",
 				iniPath);
 		} else {
 			REX::INFO(
-				"config: loaded '{}' (LockControllerGlyphs={}, AutoDetectSteamDeck={})",
+				"config: loaded '{}' (LockControllerGlyphs={}, LockGlyphsHotkey=0x{:x})",
 				iniPath,
 				cfg.lockControllerGlyphs ? "true" : "false",
-				cfg.autoDetectSteamDeck ? "true" : "false");
+				static_cast<unsigned>(cfg.lockGlyphsHotkey));
 		}
-		REX::INFO(
-			"config: SteamDeck env detected={}, effective LockControllerGlyphs={} (source: {})",
-			deckDetected ? "true" : "false",
-			effectiveLock ? "true" : "false",
-			source);
+
+		// Spawn detached poller. Lifetime is the game process; the thread
+		// exits when the process does. No clean shutdown path because SFSE
+		// plugins are not expected to unload.
+		try {
+			std::thread(HotkeyPollLoop).detach();
+			REX::INFO(
+				"hotkey: registered runtime toggle on vk=0x{:x} (poll 50 ms)",
+				static_cast<unsigned>(cfg.lockGlyphsHotkey));
+		} catch (const std::exception& ex) {
+			REX::WARN(
+				"hotkey: poller failed to start ({}); INI value still applies, "
+				"runtime toggle disabled",
+				ex.what());
+		}
 	}
 }
 

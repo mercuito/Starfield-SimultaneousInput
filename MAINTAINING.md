@@ -166,45 +166,72 @@ need offset updates but the AL IDs should stay stable across minor patches.
 ## 8. Config: LockControllerGlyphs (v1.4.0+)
 
 `SimultaneousInput.ini` lives next to the DLL. Two keys, both optional;
-defaults preserve v1.3.0 behavior on desktop and switch to locked glyphs on
-Steam Deck.
+defaults preserve v1.3.0 behavior. `dist/SimultaneousInput.ini` is the
+template that ships in the install bundle.
 
 ```ini
 [Display]
 LockControllerGlyphs = false   ; default; pin glyphs to gamepad branch when true
-AutoDetectSteamDeck  = true    ; default; force-true on Deck via SteamDeck=1 env
+LockGlyphsHotkey     = VK_F8   ; default; runtime toggle (Win32 VK code)
 ```
 
 The flag short-circuits `IsGamepadCursor()` (in `src/export/SFSEPlugin.cpp`)
 to always return `true`, which is what the trampolined call sites at
 `IMenu::ShowCursor +0xA1` and `UI::SetCursorStyle +0x4CE` invoke. The
 camera-side hooks (`LookHandler::Func10`, `ProcessLookInput`,
-`ShipHud::PerformInputProcessing`, plus the LookHandler vtable shim) still
-call `IsUsingThumbstickLook()` for their own decisions, so simultaneous
-mouse + gamepad camera control is unaffected.
+`ShipHud::PerformInputProcessing`, plus the LookHandler vtable shim)
+still call `IsUsingThumbstickLook()` for their own decisions, so
+simultaneous mouse + gamepad camera control is unaffected.
 
-Steam Deck detection reads the `SteamDeck` environment variable via
-`GetEnvironmentVariableA`. Steam injects `SteamDeck=1` into the game
-process on Deck (and in the Deck UI / Big Picture mode); the game runs
-under Proton, so the Windows-side process inherits the env. The
-auto-detect runs unconditionally at plugin load, but only flips the
-effective state when `AutoDetectSteamDeck=true` (the default).
+**Why the manual flag is the primary mechanism (no Steam Deck
+auto-detect):** Tony's primary use case is streaming Starfield from a
+host PC to a Steam Deck via Steam Remote Play / MoonDeck. The game runs
+on the host, not the Deck, so the host process has no Deck-specific
+signal to detect. Steam Input emulates an Xbox controller end-to-end and
+the host sees only generic gamepad events. An earlier draft tried
+`SteamDeck=1` env auto-detection; it was dropped because it never fires
+in the streaming setup. If you want auto-behavior in some future
+Deck-native variant, add a separate detection path; do not assume the
+env var alone is sufficient.
 
-The plugin always logs the loaded INI path, the parsed values, the
-detected env state, and the effective post-override flag with its source.
-Look for two lines near the start of `SimultaneousInput.log`:
+**Runtime toggle (hotkey):** the plugin spawns one detached background
+thread that polls `GetAsyncKeyState` every 50 ms on the configured VK.
+Rising-edge detection (was-up, now-down) flips `g_lockControllerGlyphs`
+and writes a `[I]` log entry. Polling is the smallest-diff option:
+`SetWindowsHookEx` adds latency to every keypress on every thread (game
+input gets penalized), and `RegisterHotKey` would force us to stand up a
+message pump. 50 ms is below the human-press floor and keeps the polling
+thread under 1% on one core (`GetAsyncKeyState` is a thin syscall).
+
+The thread is detached; SFSE plugins do not get a clean unload, so we
+let the process tear it down on game exit. There is no shutdown path or
+join.
+
+**Hotkey value parsing** accepts a hex literal (`0x77`), a decimal
+(`119`), or one of a short list of named VK constants
+(`VK_F1..VK_F12`, `VK_PAUSE`, `VK_SCROLL`, `VK_NUMPAD0..9`, `VK_ADD`,
+`VK_SUBTRACT`, `VK_OEM_PLUS`, `VK_OEM_MINUS`, etc.). Full Win32 VK names
+table (200+ entries) is overkill; if you bind something exotic, drop in
+the hex.
+
+The plugin always logs the loaded INI path, the parsed values, and the
+hotkey registration. Look for two lines near the start of
+`SimultaneousInput.log`:
 
 ```
-config: loaded '<...>SimultaneousInput.ini' (LockControllerGlyphs=false, AutoDetectSteamDeck=true)
-config: SteamDeck env detected=true, effective LockControllerGlyphs=true (source: steamdeck-autodetect)
+config: loaded '<...>SimultaneousInput.ini' (LockControllerGlyphs=true, LockGlyphsHotkey=0x77)
+hotkey: registered runtime toggle on vk=0x77 (poll 50 ms)
 ```
 
-If you change behavior on a deployment, those two lines tell you what the
-plugin actually did.
+When you tap the hotkey in-game:
 
-The INI parser is hand-rolled (~50 LoC, no new vcpkg dep). Section + key
+```
+hotkey: LockControllerGlyphs toggled false -> true (vk=0x77)
+```
+
+The INI parser is hand-rolled (~80 LoC, no new vcpkg dep). Section + key
 matching is case-insensitive; bool values accept
 `true|false|1|0|yes|no|on|off`; `;` and `#` start comments anywhere on a
 line. If the plugin ever needs more than a handful of keys, swap the
-parser for inih or simpleini and keep the same `IniConfig` struct shape
-so callers do not move.
+parser for inih or simpleini and keep the `IniConfig` struct shape so
+callers do not move.
