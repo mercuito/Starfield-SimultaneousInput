@@ -194,8 +194,8 @@ static bool UsingThumbstickLook = false;
 // event->yValue from the LookHandler vtable shim before the engine processes
 // the event. Both stick-claim NOPs in BSPCGamepadDevice::Poll mean the engine
 // always uses mouse-scale; this boost compensates so thumbstick input still
-// produces meaningful camera rotation. Adjust live via VK_F9 (-0.5) /
-// VK_F10 (+0.5) hotkeys; bounds clamped to [0.5, 100.0].
+// produces meaningful camera rotation. Adjust live via Page Down (-0.5) /
+// Page Up (+0.5) hotkeys; bounds clamped to [0.5, 100.0].
 static std::atomic<float> g_thumbstickBoost{ 5.0f };
 
 // The engine has a global byte at RVA 0x5F67820 in Starfield 1.16.236 that
@@ -675,13 +675,14 @@ namespace
 			}
 
 			// === Thumbstick boost tuning hotkeys ===
-			// VK_F9 (0x78) decreases boost by 0.5; VK_F10 (0x79) increases by
-			// 0.5. Clamped to [0.5, 100]. Logs new value on each press for
-			// out-of-band confirmation. Hardcoded VKs because the boost is a
-			// dev-tuning knob; if it stays in the released plugin it'll move
-			// to INI keys.
-			constexpr int kBoostDownVK = 0x78;  // VK_F9
-			constexpr int kBoostUpVK   = 0x79;  // VK_F10
+			// Page Down decreases boost by 0.5; Page Up increases by 0.5.
+			// Clamped to [0.5, 100]. Logs new value on each press for
+			// out-of-band confirmation. Page Up/Down chosen because Starfield
+			// does not bind them by default and they don't conflict with
+			// quickload (F9). Hardcoded VKs because the boost is a dev-tuning
+			// knob; if it stays in the released plugin it'll move to INI keys.
+			constexpr int kBoostDownVK = 0x22;  // VK_NEXT  (Page Down)
+			constexpr int kBoostUpVK   = 0x21;  // VK_PRIOR (Page Up)
 			constexpr float kBoostStep = 0.5f;
 			constexpr float kBoostMin  = 0.5f;
 			constexpr float kBoostMax  = 100.0f;
@@ -692,7 +693,7 @@ namespace
 				float next = cur - kBoostStep;
 				if (next < kBoostMin) next = kBoostMin;
 				g_thumbstickBoost.store(next, std::memory_order_relaxed);
-				REX::INFO("thumbstick boost: {:.2f} -> {:.2f} (VK_F9)", cur, next);
+				REX::INFO("thumbstick boost: {:.2f} -> {:.2f} (PgDn)", cur, next);
 			}
 			wasBoostDownKeyDown = boostDownDown;
 
@@ -702,7 +703,7 @@ namespace
 				float next = cur + kBoostStep;
 				if (next > kBoostMax) next = kBoostMax;
 				g_thumbstickBoost.store(next, std::memory_order_relaxed);
-				REX::INFO("thumbstick boost: {:.2f} -> {:.2f} (VK_F10)", cur, next);
+				REX::INFO("thumbstick boost: {:.2f} -> {:.2f} (PgUp)", cur, next);
 			}
 			wasBoostUpKeyDown = boostUpDown;
 
