@@ -196,7 +196,7 @@ static bool UsingThumbstickLook = false;
 // always uses mouse-scale; this boost compensates so thumbstick input still
 // produces meaningful camera rotation. Adjust live via Page Down (-0.5) /
 // Page Up (+0.5) hotkeys; bounds clamped to [0.5, 100.0].
-static std::atomic<float> g_thumbstickBoost{ 5.0f };
+static std::atomic<float> g_thumbstickBoost{ 1.0f };
 
 // The engine has a global byte at RVA 0x5F67820 in Starfield 1.16.236 that
 // many code paths inline-check to decide "is gamepad the active input mode."
