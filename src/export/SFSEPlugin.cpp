@@ -769,24 +769,37 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 			+[](RE::PlayerControls::LookHandler*, RE::InputEvent* event) -> bool {
 				// Slot 1 is correct (verified in IDA: dispatcher at
 				// Starfield.exe+0x22DD3F0 does `mov rax,[rcx]; call [rax+8]`).
-				// The previous body crashed because `event->QUserEvent() !=
-				// "Look"sv` triggered MSVC struct-return-via-hidden-arg for
-				// libxse's BSFixedString (non-trivial dtor), but the engine
-				// returns BSFixedString in rax. The convention mismatch
-				// corrupted state inside the engine on the first mouse click
-				// (rsi=0xFFFFFFFF in [rsi+10h]). Skip the QUserEvent compare;
-				// engine slot 9 + per-eventType vfuncs handle downstream
-				// filtering.
-				switch (event->eventType) {
-					case RE::InputEvent::EventType::kMouseMove:
-						UsingThumbstickLook = false;
-						return true;
-					case RE::InputEvent::EventType::kThumbstick:
-						UsingThumbstickLook = true;
-						return true;
-					default:
-						return false;
+				//
+				// We CANNOT call `event->QUserEvent()` here: it returns
+				// BSFixedString by value, BSFixedString has a non-trivial
+				// dtor (refcount), so MSVC emits struct-return-via-hidden-arg
+				// at the call site, but the engine's QUserEvent returns
+				// in rax. The ABI mismatch crashed the engine on the first
+				// mouse click (rsi=0xFFFFFFFF in [rsi+10h]).
+				//
+				// Instead we read IDEvent::strUserEvent directly from offset
+				// 0x28 (no virtual call). MouseMove/Thumbstick events are
+				// IDEvents in this engine, so the cast is safe. BSFixedString
+				// equality is a leaf-pointer compare — no string content
+				// access, no allocations.
+				static const RE::BSFixedString kLookEvent{ "Look" };
+
+				if (event->eventType != RE::InputEvent::EventType::kMouseMove &&
+					event->eventType != RE::InputEvent::EventType::kThumbstick) {
+					return false;
 				}
+
+				const auto* idevent = static_cast<const RE::IDEvent*>(event);
+				if (idevent->strUserEvent != kLookEvent) {
+					return false;
+				}
+
+				if (event->eventType == RE::InputEvent::EventType::kMouseMove) {
+					UsingThumbstickLook = false;
+				} else {
+					UsingThumbstickLook = true;
+				}
+				return true;
 			});
 		REX::INFO("vtable shim installed: LookHandler slot 1");
 		++g_hooksInstalled;
