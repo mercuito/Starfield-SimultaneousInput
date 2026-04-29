@@ -883,7 +883,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 						// The factor is hardcoded for now; if it feels too
 						// fast or slow in-game, edit this constant and
 						// rebuild. INI exposure is a v6.1 todo.
-						constexpr float kThumbstickToMouseBoost = 50.0f;
+						constexpr float kThumbstickToMouseBoost = 5.0f;
 						*xValue *= kThumbstickToMouseBoost;
 						*yValue *= kThumbstickToMouseBoost;
 					}
