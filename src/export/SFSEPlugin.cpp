@@ -61,11 +61,13 @@ extern "C" {
 	};
 
 	__declspec(dllimport) int   __stdcall GetModuleHandleExA(DWORD, LPCSTR, HMODULE*);
+	__declspec(dllimport) HMODULE __stdcall GetModuleHandleA(LPCSTR);
 	__declspec(dllimport) DWORD __stdcall GetModuleFileNameA(HMODULE, char*, DWORD);
 	__declspec(dllimport) short __stdcall GetAsyncKeyState(int);
 	__declspec(dllimport) unsigned long long __stdcall GetTickCount64();
 	__declspec(dllimport) void  __stdcall Sleep(DWORD);
 	__declspec(dllimport) DWORD __stdcall XInputGetState(DWORD, XINPUT_STATE*);
+	__declspec(dllimport) int   __stdcall VirtualProtect(void*, unsigned long long, DWORD, DWORD*);
 }
 
 #pragma comment(lib, "Xinput.lib")
@@ -187,6 +189,49 @@ bool IsUsingGamepad(RE::BSInputDeviceManager* a_inputDeviceManager)
 // This is the core of the mod: the engine treats look input as a single-source
 // stream, but we split it on event type so mouse and gamepad coexist.
 static bool UsingThumbstickLook = false;
+
+// The engine has a global byte at RVA 0x5F67820 in Starfield 1.16.236 that
+// many code paths inline-check to decide "is gamepad the active input mode."
+// (Verified via IDA xref scan — 145 read sites across the binary, including
+// inside the original LookHandler::CanHandle implementation we replaced.)
+//
+// The maintainer's IsUsingGamepad-replacement strategy was supposed to flip
+// this decision per-event by hooking call sites of a predicate function, but
+// the deriver tool mis-identified the predicate function (the 4 hooked sites
+// actually call BSStringPool::Entry::Release, a refcount cleanup, not a
+// predicate). The predicate has been INLINED into all 145 callers as a direct
+// `cmp cs:byte_145F67820, 0` — there's no single function to hook.
+//
+// Workaround: mirror the UsingThumbstickLook latch into this byte from the
+// vtable shim. Every inlined check then reads our intended state for the
+// event currently being processed. Gives true per-event sensitivity scaling
+// without needing to find each inlined check.
+static std::atomic<std::uint8_t*> g_gamepadActiveFlag{ nullptr };
+
+static constexpr std::uintptr_t kGamepadActiveFlagRVA = 0x5F67820;
+static constexpr DWORD kPageReadWrite = 0x04;
+
+// Resolve byte_145F67820's runtime address and make its page writable.
+// Idempotent — call once during SFSEPlugin_Load.
+static void InitGamepadActiveFlag()
+{
+	HMODULE main_module = GetModuleHandleA(nullptr);
+	if (!main_module) {
+		REX::WARN("gamepad-flag mirror: GetModuleHandleA(NULL) returned null; skipped");
+		return;
+	}
+	auto addr = reinterpret_cast<std::uint8_t*>(
+		reinterpret_cast<std::uintptr_t>(main_module) + kGamepadActiveFlagRVA);
+	DWORD old_prot = 0;
+	if (VirtualProtect(addr, 1, kPageReadWrite, &old_prot)) {
+		g_gamepadActiveFlag.store(addr, std::memory_order_relaxed);
+		REX::INFO("gamepad-flag mirror: byte_145F67820 at {:p} now writable (was prot=0x{:X})",
+			static_cast<void*>(addr), old_prot);
+	} else {
+		REX::WARN("gamepad-flag mirror: VirtualProtect failed for {:p}; skipping",
+			static_cast<void*>(addr));
+	}
+}
 
 // Drop-in replacement for IsUsingGamepad in look-related call sites. The
 // original engine code uses "is current device the gamepad" to switch
@@ -757,6 +802,14 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	// final flag state on its first invocation.
 	LoadConfig(a_sfse);
 
+	// Resolve byte_145F67820's runtime address and make its page writable.
+	// The LookHandler vtable shim mirrors UsingThumbstickLook into this
+	// byte for per-event sensitivity scaling. See the comment on
+	// g_gamepadActiveFlag for why this is the actual fix for the per-event
+	// look-sensitivity decision (the maintainer's predicate-replacement
+	// hooks target a refcount Release function, not a predicate).
+	InitGamepadActiveFlag();
+
 	// === Vtable shim: split look input by event type ===
 	// LookHandler vtable slot 1 is the per-event handler. We replace it with a
 	// closure that latches UsingThumbstickLook based on event type, and only
@@ -796,16 +849,16 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 
 				if (event->eventType == RE::InputEvent::EventType::kMouseMove) {
 					UsingThumbstickLook = false;
+					if (auto* flag = g_gamepadActiveFlag.load(std::memory_order_relaxed)) {
+						*flag = 0;  // mirror: gamepad NOT active for look scaling
+					}
 				} else {
 					// Only latch UsingThumbstickLook=true when the stick has
 					// meaningful magnitude. The engine sends a final zero-
 					// valued thumbstick event when the user releases the stick;
 					// if we latched on that, UsingThumbstickLook would stay
-					// true after release, and the look-sensitivity hooks
-					// downstream (LookHandler::Func10, ProcessLookInput) would
-					// keep using gamepad-scale on subsequent mouse moves —
-					// causing the "mouse sensitivity skyrockets after right-
-					// stick release" symptom.
+					// true after release, and the inlined gamepad-flag readers
+					// would keep using gamepad-scale for subsequent mouse moves.
 					//
 					// ThumbstickEvent layout (verified in IDA via slot 4
 					// OnThumbstickEvent at sub_1412BCC30 reading floats from
@@ -815,6 +868,9 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 					const float yValue = *reinterpret_cast<const float*>(raw + 0x3C);
 					if (xValue != 0.0f || yValue != 0.0f) {
 						UsingThumbstickLook = true;
+						if (auto* flag = g_gamepadActiveFlag.load(std::memory_order_relaxed)) {
+							*flag = 1;  // mirror: gamepad IS active for look scaling
+						}
 					}
 				}
 				return true;
