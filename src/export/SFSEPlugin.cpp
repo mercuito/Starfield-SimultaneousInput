@@ -175,20 +175,23 @@ namespace RE
 	}
 }
 
-// Original engine predicate: returns true when the active input device is the
-// gamepad.
+// Retired engine predicate wrapper. The 1.16.236 AL ID that earlier tooling
+// selected for this is not a predicate, so do not dispatch through it.
 bool IsUsingGamepad(RE::BSInputDeviceManager* a_inputDeviceManager)
 {
-	using func_t = decltype(IsUsingGamepad);
-	REL::Relocation<func_t> func{ RE::Offset::BSInputDeviceManager::IsUsingGamepad };
-	return func(a_inputDeviceManager);
+	(void)a_inputDeviceManager;
+	return false;
 }
 
 // Latched state set by the LookHandler vtable shim below. True when the most
 // recent QLook event came from a thumbstick; false when it came from MouseMove.
 // This is the core of the mod: the engine treats look input as a single-source
 // stream, but we split it on event type so mouse and gamepad coexist.
-static bool UsingThumbstickLook = false;
+//
+// Input dispatch can run on multiple threads, while the redirected sensitivity
+// predicates may be called on a different one. Keep this atomic so button /
+// trigger clears and mouse-look clears are visible immediately everywhere.
+static std::atomic_bool UsingThumbstickLook{ false };
 
 // The engine has a global byte at RVA 0x5F67820 in Starfield 1.16.236 that
 // many code paths inline-check to decide "is gamepad the active input mode."
@@ -224,12 +227,57 @@ static void InitGamepadActiveFlag()
 		reinterpret_cast<std::uintptr_t>(main_module) + kGamepadActiveFlagRVA);
 	DWORD old_prot = 0;
 	if (VirtualProtect(addr, 1, kPageReadWrite, &old_prot)) {
+		*addr = 0;
+		UsingThumbstickLook.store(false, std::memory_order_relaxed);
 		g_gamepadActiveFlag.store(addr, std::memory_order_relaxed);
-		REX::INFO("gamepad-flag mirror: byte_145F67820 at {:p} now writable (was prot=0x{:X})",
+		REX::INFO("gamepad-flag mirror: byte_145F67820 at {:p} now writable and initialized to 0 (was prot=0x{:X})",
 			static_cast<void*>(addr), old_prot);
 	} else {
 		REX::WARN("gamepad-flag mirror: VirtualProtect failed for {:p}; skipping",
 			static_cast<void*>(addr));
+	}
+}
+
+static void ClearGamepadActiveFlag()
+{
+	if (auto* flag = g_gamepadActiveFlag.load(std::memory_order_relaxed)) {
+		*flag = 0;
+	}
+}
+
+static void SetGamepadActiveFlag()
+{
+	if (auto* flag = g_gamepadActiveFlag.load(std::memory_order_relaxed)) {
+		*flag = 1;
+	}
+}
+
+static constexpr std::uintptr_t kInputValueHelperRVA = 0x22FE890;
+using InputValueHelper_t = void(void*, std::uint32_t, float, float, float);
+
+static std::atomic<std::uint32_t> g_triggerActiveClearCount{ 0 };
+
+void TriggerInputValueHelper(void* a_device, std::uint32_t a_id, float a_time, float a_previous, float a_value)
+{
+	REL::Relocation<InputValueHelper_t> original{ REL::Offset(kInputValueHelperRVA) };
+	original(a_device, a_id, a_time, a_previous, a_value);
+
+	if (a_device && (a_id == 9 || a_id == 10)) {
+		auto* deviceBytes = static_cast<std::uint8_t*>(a_device);
+		if (deviceBytes[9] == static_cast<std::uint8_t>(RE::InputEvent::DeviceType::kGamepad)) {
+			deviceBytes[8] = 0;
+			UsingThumbstickLook.store(false, std::memory_order_relaxed);
+			ClearGamepadActiveFlag();
+
+			const auto count = g_triggerActiveClearCount.fetch_add(1, std::memory_order_relaxed);
+			if (count < 8) {
+				REX::INFO(
+					"trigger active-device clear: gamepad helper id={} value={:.3f} previous={:.3f}",
+					a_id,
+					a_value,
+					a_previous);
+			}
+		}
 	}
 }
 
@@ -240,7 +288,7 @@ static void InitGamepadActiveFlag()
 // with the stick", not "did the user touch the stick at all".
 bool IsUsingThumbstickLook(RE::BSInputDeviceManager*)
 {
-	return UsingThumbstickLook;
+	return UsingThumbstickLook.load(std::memory_order_relaxed);
 }
 
 // For cursor visibility/style hooks: the cursor should follow the gamepad
@@ -254,10 +302,12 @@ bool IsUsingThumbstickLook(RE::BSInputDeviceManager*)
 // their own decisions; only the cursor/glyph display is pinned.
 bool IsGamepadCursor(RE::BSInputDeviceManager* a_inputDeviceManager)
 {
+	(void)a_inputDeviceManager;
+
 	if (g_lockControllerGlyphs.load(std::memory_order_relaxed)) {
 		return true;
 	}
-	return UsingThumbstickLook && IsUsingGamepad(a_inputDeviceManager);
+	return UsingThumbstickLook.load(std::memory_order_relaxed);
 }
 
 namespace
@@ -298,6 +348,43 @@ namespace
 				a_id.offset(),
 				a_offset,
 				hook.address());
+			++g_hooksInstalled;
+			return true;
+		} catch (const std::exception& ex) {
+			REX::ERROR(
+				"hook '{}' failed: {} (at {}:{})",
+				a_label,
+				ex.what(),
+				a_loc.file_name(),
+				a_loc.line());
+			++g_hooksSkipped;
+			return false;
+		}
+	}
+
+	template <std::size_t N, class F>
+	bool TryWriteCallAt(
+		std::uintptr_t              a_address,
+		F                           a_dst,
+		std::string_view            a_label,
+		const std::source_location& a_loc = std::source_location::current())
+	{
+		try {
+			if (!REL::Pattern<"E8">().match(a_address)) {
+				REX::WARN(
+					"hook '{}' skipped: rva {:#x} did not start with E8 (call). "
+					"function was refactored on this runtime.",
+					a_label,
+					a_address - REX::FModule::GetExecutingModule().GetBaseAddress());
+				++g_hooksSkipped;
+				return false;
+			}
+			REL::GetTrampoline().write_call<N>(a_address, a_dst);
+			REX::INFO(
+				"hook '{}' installed: rva {:#x} -> {:#x}",
+				a_label,
+				a_address - REX::FModule::GetExecutingModule().GetBaseAddress(),
+				a_address);
 			++g_hooksInstalled;
 			return true;
 		} catch (const std::exception& ex) {
@@ -778,9 +865,8 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	// and (when trampoline=true) reserves trampoline space from SFSE's
 	// branch pool, falling back to a self-allocated trampoline.
 	//
-	// Trampoline budget: 32 bytes covers the six trampoline calls we install
-	// on 1.16.236 (LookHandler::Func10, ProcessLookInput, ShipHud x2,
-	// IMenu::ShowCursor, UI::SetCursorStyle). The 1.8.86-era
+	// Trampoline budget: 32 bytes covers the two cursor trampoline calls.
+	// The 1.8.86-era
 	// Run_WindowsMessageLoop hook is no longer attempted because the
 	// underlying predicate call was refactored out of the message pump in
 	// 1.16.236; see MAINTAINING.md section 7. Bump this if we add hooks. We
@@ -839,18 +925,63 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 
 				if (event->eventType != RE::InputEvent::EventType::kMouseMove &&
 					event->eventType != RE::InputEvent::EventType::kThumbstick) {
+					if (event->deviceType == RE::InputEvent::DeviceType::kGamepad &&
+						event->eventType == RE::InputEvent::EventType::kButton) {
+						const auto* button = static_cast<const RE::ButtonEvent*>(event);
+						const char* cur = button->strUserEvent.c_str();
+						UsingThumbstickLook.store(false, std::memory_order_relaxed);
+						ClearGamepadActiveFlag();
+						static thread_local const char* s_lastButtonUE = nullptr;
+						static thread_local float s_lastButtonValue = -1.0f;
+						if (cur != s_lastButtonUE || button->value != s_lastButtonValue) {
+							REX::INFO(
+								"shim: cleared look mirror for gamepad button userEvent='{}' value={:.3f} held={:.3f}",
+								cur ? cur : "<null>",
+								button->value,
+								button->heldDownSecs);
+							s_lastButtonUE = cur;
+							s_lastButtonValue = button->value;
+						}
+					}
 					return false;
 				}
 
 				const auto* idevent = static_cast<const RE::IDEvent*>(event);
 				if (idevent->strUserEvent != kLookEvent) {
+					// Analog trigger events are also surfaced as kThumbstick
+					// IDEvents, but they are not camera-look events. If one
+					// arrives while the last real look event was right-stick,
+					// the gamepad sensitivity mirror can stay latched until a
+					// keyboard movement event makes the engine pick KBM again.
+					// Clear the mirror here, but still return false so the
+					// LookHandler does not consume the trigger/button event.
+					if (event->eventType == RE::InputEvent::EventType::kThumbstick) {
+						static thread_local const char* s_lastUE = nullptr;
+						const char* cur = idevent->strUserEvent.c_str();
+						UsingThumbstickLook.store(false, std::memory_order_relaxed);
+						ClearGamepadActiveFlag();
+						if (cur != s_lastUE) {
+							const auto* raw = reinterpret_cast<const std::byte*>(event);
+							const float x = *reinterpret_cast<const float*>(raw + 0x38);
+							const float y = *reinterpret_cast<const float*>(raw + 0x3C);
+							REX::INFO("shim: cleared look mirror for non-Look kThumbstick userEvent='{}' x={:.3f} y={:.3f}",
+								cur ? cur : "<null>", x, y);
+							s_lastUE = cur;
+						}
+					}
 					return false;
 				}
 
+				// DIAG (L2 sensitivity hunt): log writes to byte_145F67820
+				// only on transition. Drop this once L2 fix lands.
+				static thread_local int s_lastWrite = -1;
+
 				if (event->eventType == RE::InputEvent::EventType::kMouseMove) {
-					UsingThumbstickLook = false;
-					if (auto* flag = g_gamepadActiveFlag.load(std::memory_order_relaxed)) {
-						*flag = 0;  // mirror: gamepad NOT active for look scaling
+					UsingThumbstickLook.store(false, std::memory_order_relaxed);
+					ClearGamepadActiveFlag();
+					if (s_lastWrite != 0) {
+						REX::INFO("shim/diag: WRITE 0 (mouseMove userEvent=Look) [prev={}]", s_lastWrite);
+						s_lastWrite = 0;
 					}
 				} else {
 					// Only latch UsingThumbstickLook=true when the stick has
@@ -866,9 +997,20 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 					const float xValue = *reinterpret_cast<const float*>(raw + 0x38);
 					const float yValue = *reinterpret_cast<const float*>(raw + 0x3C);
 					if (xValue != 0.0f || yValue != 0.0f) {
-						UsingThumbstickLook = true;
-						if (auto* flag = g_gamepadActiveFlag.load(std::memory_order_relaxed)) {
-							*flag = 1;  // mirror: gamepad IS active for look scaling
+						UsingThumbstickLook.store(true, std::memory_order_relaxed);
+						SetGamepadActiveFlag();
+						if (s_lastWrite != 1) {
+							REX::INFO("shim/diag: WRITE 1 (thumbstick Look x={:.3f} y={:.3f}) [prev={}]",
+								xValue, yValue, s_lastWrite);
+							s_lastWrite = 1;
+						}
+					} else {
+						UsingThumbstickLook.store(false, std::memory_order_relaxed);
+						ClearGamepadActiveFlag();
+						if (s_lastWrite != 0) {
+							REX::INFO("shim/diag: WRITE 0 (zero thumbstick Look x={:.3f} y={:.3f}) [prev={}]",
+								xValue, yValue, s_lastWrite);
+							s_lastWrite = 0;
 						}
 					}
 				}
@@ -882,43 +1024,53 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	}
 
 	// === Direct byte patch: stop sticks from claiming the device ===
-	// Inside BSPCGamepadDevice::Poll the engine writes 1 to a byte indicating
-	// "stick moved -> active device is gamepad". On 1.16.236 the function
-	// contains TWO such writes (verified via on-disk Starfield.exe scan):
-	//   fn+0x51D : left-stick claim
-	//   fn+0x5DC : right-stick claim
-	// We NOP every occurrence so neither stick flips the engine's active-
-	// device state. This forces the engine to use mouse-scale for all look
-	// input. The LookHandler vtable shim above compensates by boosting
-	// thumbstick xValue/yValue in-place so gamepad input still produces
-	// meaningful camera rotation.
+	// Inside BSPCGamepadDevice poll/update paths the engine writes 1 to a byte
+	// indicating "stick moved -> active device is gamepad". On 1.16.236 IDA
+	// shows two paths with two direct writes apiece:
+	//   Poll         +0x51D / +0x5DC
+	//   ExtendedPoll +0x409 / +0x4A8
+	// We NOP every occurrence so stick polling does not overwrite the
+	// per-event byte mirror maintained by the LookHandler vtable shim.
 	// Pattern: C6 43 08 01  (mov byte ptr [rbx+8], 1)
 	try {
-		REL::Relocation<std::uintptr_t> head(RE::Offset::BSPCGamepadDevice::Poll);
 		constexpr std::size_t kScanLimit = 0x800;
-		const std::uint8_t*   p = reinterpret_cast<const std::uint8_t*>(head.address());
 		std::size_t           patched = 0;
-		for (std::size_t i = 0; i + 4 <= kScanLimit; ++i) {
-			if (p[i] == 0xC6 && p[i + 1] == 0x43 && p[i + 2] == 0x08 && p[i + 3] == 0x01) {
-				REL::Relocation<std::uintptr_t> hook(
-					RE::Offset::BSPCGamepadDevice::Poll, static_cast<std::ptrdiff_t>(i));
-				hook.write_fill(REL::NOP, 0x4);
-				REX::INFO("byte patch installed: BSPCGamepadDevice::Poll +{:#x}", i);
-				++patched;
-				i += 3;  // skip past this match
+
+		auto patchPollPath = [&](REL::Relocation<std::uintptr_t> head, const char* name) {
+			const std::uint8_t* p = reinterpret_cast<const std::uint8_t*>(head.address());
+			std::size_t pathPatched = 0;
+			for (std::size_t i = 0; i + 4 <= kScanLimit; ++i) {
+				if (p[i] == 0xC6 && p[i + 1] == 0x43 && p[i + 2] == 0x08 && p[i + 3] == 0x01) {
+					REL::Relocation<std::uintptr_t> hook(head.address() + i);
+					hook.write_fill(REL::NOP, 0x4);
+					REX::INFO("byte patch installed: {} +{:#x}", name, i);
+					++pathPatched;
+					i += 3;  // skip past this match
+				}
 			}
-		}
+			return pathPatched;
+		};
+
+		patched += patchPollPath(
+			REL::Relocation<std::uintptr_t>(RE::Offset::BSPCGamepadDevice::Poll),
+			"BSPCGamepadDevice::Poll");
+		patched += patchPollPath(
+			REL::Relocation<std::uintptr_t>(RE::Offset::BSPCGamepadDevice::ExtendedPoll),
+			"BSPCGamepadDevice::ExtendedPoll");
+
 		if (patched > 0) {
 			++g_hooksInstalled;
-			REX::INFO("byte patch summary: NOPed {} stick-claim write(s)", patched);
+			REX::INFO("byte patch summary: NOPed {} gamepad active-device write(s)", patched);
 		} else {
 			REX::WARN(
-				"byte patch skipped: BSPCGamepadDevice::Poll AL id {} (rva {:#x}) "
-				"anchor 'C6 43 08 01' not found in first {:#x} bytes; function may "
-				"have been refactored further. thumbsticks will still device-switch.",
+				"byte patch skipped: gamepad poll active-device anchor 'C6 43 08 01' "
+				"not found in first {:#x} bytes of Poll AL id {} (rva {:#x}) or "
+				"ExtendedPoll rva {:#x}; function may have been refactored further. "
+				"thumbsticks will still device-switch.",
+				kScanLimit,
 				RE::Offset::BSPCGamepadDevice::Poll.id(),
 				RE::Offset::BSPCGamepadDevice::Poll.offset(),
-				kScanLimit);
+				RE::Offset::BSPCGamepadDevice::ExtendedPoll.offset());
 			++g_hooksSkipped;
 		}
 	} catch (const std::exception& ex) {
@@ -926,36 +1078,43 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 		++g_hooksSkipped;
 	}
 
-	// === Look-input call replacements (predicate IsUsingGamepad -> IsUsingThumbstickLook) ===
-	// Offsets re-derived against Starfield 1.16.236 via
-	// tools/derive_function_ids.py: each is the position of an E8 call to
-	// the look-variant predicate (RVA 0x28cef30, AL 139340) inside the
-	// host function body.
-	TryWriteCall<5>(
-		RE::Offset::PlayerControls::LookHandler::Func10, 0x196,
-		IsUsingThumbstickLook,
-		"LookHandler::Func10 (2-quadrant slow-movement fix)");
+	// === Trigger helper call replacements ===
+	// LT/RT are generated through the shared input value helper with IDs 9/10.
+	// Let the engine create the ButtonEvent normally, then clear only the
+	// gamepad device active byte so SecondaryAttack does not leave mouse look
+	// on the gamepad sensitivity path until a keyboard event arrives.
+	try {
+		REL::Relocation<std::uintptr_t> pollHead(RE::Offset::BSPCGamepadDevice::Poll);
+		REL::Relocation<std::uintptr_t> extendedHead(RE::Offset::BSPCGamepadDevice::ExtendedPoll);
 
-	TryWriteCall<5>(
-		RE::Offset::PlayerControls::Manager::ProcessLookInput, 0x33F,
-		IsUsingThumbstickLook,
-		"PlayerControls::Manager::ProcessLookInput (look sensitivity)");
+		TryWriteCallAt<5>(
+			pollHead.address() + 0x3AC,
+			TriggerInputValueHelper,
+			"BSPCGamepadDevice::Poll LT helper");
+		TryWriteCallAt<5>(
+			pollHead.address() + 0x3DC,
+			TriggerInputValueHelper,
+			"BSPCGamepadDevice::Poll RT helper");
+		TryWriteCallAt<5>(
+			extendedHead.address() + 0x325,
+			TriggerInputValueHelper,
+			"BSPCGamepadDevice::ExtendedPoll LT helper");
+		TryWriteCallAt<5>(
+			extendedHead.address() + 0x34D,
+			TriggerInputValueHelper,
+			"BSPCGamepadDevice::ExtendedPoll RT helper");
+	} catch (const std::exception& ex) {
+		REX::ERROR("trigger helper hook setup failed: {}", ex.what());
+		++g_hooksSkipped;
+	}
 
-	// Main::Run_WindowsMessageLoop +0x39 (1.8.86) had no analog on
-	// 1.16.236: the host body has 775 E8 calls in its first 24 KB and
-	// none target either predicate variant. The cursor-capture branch was
-	// inlined or moved. Hook permanently retired; see MAINTAINING.md
-	// section 7.
-
-	TryWriteCall<5>(
-		RE::Offset::ShipHudDataModel::PerformInputProcessing, 0x2C7,
-		IsUsingThumbstickLook,
-		"ShipHudDataModel::PerformInputProcessing+0x2C7 (ship reticle pre)");
-
-	TryWriteCall<5>(
-		RE::Offset::ShipHudDataModel::PerformInputProcessing, 0x2E4,
-		IsUsingThumbstickLook,
-		"ShipHudDataModel::PerformInputProcessing+0x2E4 (ship reticle post)");
+	// === Retired look-input call replacements ===
+	// IDA verification showed the alleged 1.16.236 look predicate at
+	// RVA 0x28CEF30 is a BSStringPool-style refcount cleanup routine
+	// (lock cmpxchg/xadd + WakeByAddressAll), not a boolean predicate.
+	// Replacing those calls with IsUsingThumbstickLook skips cleanup and has
+	// no useful return value at the call sites. For look scaling, rely on the
+	// byte_145F67820 event mirror instead and leave those calls untouched.
 
 	// === Cursor visibility/style call replacements (-> IsGamepadCursor) ===
 	// Offsets target the cursor-variant predicate (RVA 0x2c4b50, AL 35982);

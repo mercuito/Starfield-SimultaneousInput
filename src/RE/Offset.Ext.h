@@ -21,16 +21,12 @@ namespace RE
 	{
 		// Predicate: bool IsUsingGamepad(BSInputDeviceManager*).
 		//
-		// Bethesda split the predicate across cursor-vs-look subsystems on
-		// 1.16.236. The look variant is at RVA 0x28cef30 (AL 139340), called
-		// from LookHandler::Func10, ProcessLookInput, and the two
-		// ShipHudDataModel::PerformInputProcessing call sites. The cursor
-		// variant is at RVA 0x2c4b50 (AL 35982), called from IMenu::ShowCursor
-		// and UI::SetCursorStyle. Our IsGamepadCursor() helper internally
-		// invokes IsUsingGamepad via this AL ID; the cursor sites still get
-		// rewritten correctly because TryWriteCall only replaces the call
-		// target at the offset, it does not require the original target to
-		// match this ID.
+		// Earlier tooling treated RVA 0x28cef30 (AL 139340) as the
+		// 1.16.236 look predicate because it was called from several
+		// input host bodies. IDA verification later showed it is
+		// BSStringPool-style refcount cleanup code, not IsUsingGamepad.
+		// Keep this ID only as a historical marker; SFSEPlugin.cpp does not
+		// dispatch through it or rewrite calls that target it.
 		//
 		// Was 178879 (Parapets, 1.8.86). On 1.16.236 that ID resolves to a
 		// debug log stub at 0x3552490 (TLS singleton accessor + format/log
@@ -42,19 +38,23 @@ namespace RE
 			constexpr REL::ID IsUsingGamepad{ 139340 };
 		}
 
-		// BSPCGamepadDevice::Poll. We NOP a single mov byte ptr [rbx+8], 1
-		// so that left-stick movement no longer flags the active device as
-		// gamepad. Pattern: C6 43 08 01.
+		// BSPCGamepadDevice poll/update paths. We NOP direct
+		// mov byte ptr [rbx+8], 1 writes so stick movement no longer forces
+		// the active device to gamepad. Pattern: C6 43 08 01.
 		//
 		// Was 179249 (Parapets, 1.8.86). On 1.16.236 that ID resolves to a
 		// 42-byte thunk at 0x356e720 with no anchor pattern. The real Poll
 		// in 1.16.236 is at vtable[470133][1] = RVA 0x2302bc0, which is AL
-		// ID 124384, with the anchor at offset +0x51d (was +0x2A0). We use
-		// a runtime byte-pattern scan (see SFSEPlugin.cpp) so the patch
-		// survives further minor refactors without code changes.
+		// ID 124384, with anchors at offsets +0x51d and +0x5dc.
+		//
+		// IDA also shows an adjacent extended poll/update path at
+		// RVA 0x2302390 with the same active-device writes at +0x409 and
+		// +0x4a8. This path is not currently mapped to an Address Library ID
+		// in the local metadata, so keep it as an RVA offset.
 		namespace BSPCGamepadDevice
 		{
 			constexpr REL::ID Poll{ 124384 };
+			constexpr REL::Offset ExtendedPoll{ 0x2302390 };
 		}
 
 		// IMenu::ShowCursor. Original Parapets +0x14 hook redirected the
@@ -106,10 +106,9 @@ namespace RE
 		// external/CommonLibSF/include/RE/IDs_VTABLE.h, is 433589.
 		//
 		// Func10 was originally hooked at +0xE on 1.8.86. On 1.16.236 the
-		// function body has 10 calls to the look predicate 0x28cef30; the
-		// first three (+0x196, +0x1a4, +0x236) are the bunched calls in
-		// the prologue. We hook the first one (+0x196), which is the
-		// 2-quadrant slow-movement gate analog.
+		// previous +0x196 candidate targets RVA 0x28cef30. IDA verification
+		// showed that target is refcount cleanup code, not a gamepad
+		// predicate, so SFSEPlugin.cpp no longer rewrites this call site.
 		namespace PlayerControls
 		{
 			namespace LookHandler
@@ -119,10 +118,13 @@ namespace RE
 			}
 
 			// ProcessLookInput +0x68 originally selected the sensitivity
-			// curve based on device. On 1.16.236 the host body has 4
-			// calls to the look predicate; the first three (+0x33f,
-			// +0x34a, +0x355) are the prologue cluster, and we hook the
-			// first one to redirect the device-keyed sensitivity curve.
+			// curve based on device. On 1.16.236 this AL ID resolves to a
+			// 12-byte public thunk:
+			//   mov rdx, rcx; mov rcx, [rcx+58h]; jmp sub_1424E9F20
+			// The earlier 129407+0x33F candidate crossed into neighboring
+			// sub_1424E6620, and the later absolute RVA experiment still
+			// targeted non-predicate code. SFSEPlugin.cpp leaves this call
+			// site untouched and relies on the byte_145F67820 event mirror.
 			namespace Manager
 			{
 				constexpr REL::ID ProcessLookInput{ 129407 };
@@ -131,11 +133,9 @@ namespace RE
 
 		// ShipHudDataModel::PerformInputProcessing. Originally had two
 		// call sites at +0x7AF and +0x82A that branch ship-reticle
-		// behavior on input device. On 1.16.236 the host body has 4
-		// calls to the look predicate; the close cluster
-		// (+0x2c7, +0x2e4, +0x2f7) is the analog of the original
-		// pre/post pair. We hook the first two so the same redirect is
-		// applied to both sides of the cluster.
+		// behavior on input device. The 1.16.236 +0x2C7/+0x2E4 candidates
+		// target the same non-predicate cleanup routine as Func10, so the
+		// plugin currently leaves them untouched.
 		namespace ShipHudDataModel
 		{
 			constexpr REL::ID PerformInputProcessing{ 137087 };
