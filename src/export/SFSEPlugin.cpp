@@ -797,7 +797,25 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 				if (event->eventType == RE::InputEvent::EventType::kMouseMove) {
 					UsingThumbstickLook = false;
 				} else {
-					UsingThumbstickLook = true;
+					// Only latch UsingThumbstickLook=true when the stick has
+					// meaningful magnitude. The engine sends a final zero-
+					// valued thumbstick event when the user releases the stick;
+					// if we latched on that, UsingThumbstickLook would stay
+					// true after release, and the look-sensitivity hooks
+					// downstream (LookHandler::Func10, ProcessLookInput) would
+					// keep using gamepad-scale on subsequent mouse moves —
+					// causing the "mouse sensitivity skyrockets after right-
+					// stick release" symptom.
+					//
+					// ThumbstickEvent layout (verified in IDA via slot 4
+					// OnThumbstickEvent at sub_1412BCC30 reading floats from
+					// [rdx+38h] and [rdx+3Ch]): xValue at 0x38, yValue at 0x3C.
+					const auto* raw = reinterpret_cast<const std::byte*>(event);
+					const float xValue = *reinterpret_cast<const float*>(raw + 0x38);
+					const float yValue = *reinterpret_cast<const float*>(raw + 0x3C);
+					if (xValue != 0.0f || yValue != 0.0f) {
+						UsingThumbstickLook = true;
+					}
 				}
 				return true;
 			});
