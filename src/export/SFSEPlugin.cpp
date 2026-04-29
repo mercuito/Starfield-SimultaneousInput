@@ -190,6 +190,14 @@ bool IsUsingGamepad(RE::BSInputDeviceManager* a_inputDeviceManager)
 // stream, but we split it on event type so mouse and gamepad coexist.
 static bool UsingThumbstickLook = false;
 
+// Live-tunable thumbstick magnitude boost. Multiplied into event->xValue and
+// event->yValue from the LookHandler vtable shim before the engine processes
+// the event. Both stick-claim NOPs in BSPCGamepadDevice::Poll mean the engine
+// always uses mouse-scale; this boost compensates so thumbstick input still
+// produces meaningful camera rotation. Adjust live via VK_F9 (-0.5) /
+// VK_F10 (+0.5) hotkeys; bounds clamped to [0.5, 100.0].
+static std::atomic<float> g_thumbstickBoost{ 5.0f };
+
 // The engine has a global byte at RVA 0x5F67820 in Starfield 1.16.236 that
 // many code paths inline-check to decide "is gamepad the active input mode."
 // (Verified via IDA xref scan — 145 read sites across the binary, including
@@ -638,6 +646,8 @@ namespace
 	void HotkeyPollLoop()
 	{
 		bool wasKeyDown = false;
+		bool wasBoostDownKeyDown = false;
+		bool wasBoostUpKeyDown = false;
 		bool chordWasSatisfied = false;
 		bool chordLatched = false;
 		unsigned long long chordSatisfiedAtMs = 0;
@@ -663,6 +673,38 @@ namespace
 				}
 				wasKeyDown = isKeyDown;
 			}
+
+			// === Thumbstick boost tuning hotkeys ===
+			// VK_F9 (0x78) decreases boost by 0.5; VK_F10 (0x79) increases by
+			// 0.5. Clamped to [0.5, 100]. Logs new value on each press for
+			// out-of-band confirmation. Hardcoded VKs because the boost is a
+			// dev-tuning knob; if it stays in the released plugin it'll move
+			// to INI keys.
+			constexpr int kBoostDownVK = 0x78;  // VK_F9
+			constexpr int kBoostUpVK   = 0x79;  // VK_F10
+			constexpr float kBoostStep = 0.5f;
+			constexpr float kBoostMin  = 0.5f;
+			constexpr float kBoostMax  = 100.0f;
+
+			const bool boostDownDown = (::GetAsyncKeyState(kBoostDownVK) & 0x8000) != 0;
+			if (boostDownDown && !wasBoostDownKeyDown) {
+				float cur = g_thumbstickBoost.load(std::memory_order_relaxed);
+				float next = cur - kBoostStep;
+				if (next < kBoostMin) next = kBoostMin;
+				g_thumbstickBoost.store(next, std::memory_order_relaxed);
+				REX::INFO("thumbstick boost: {:.2f} -> {:.2f} (VK_F9)", cur, next);
+			}
+			wasBoostDownKeyDown = boostDownDown;
+
+			const bool boostUpDown = (::GetAsyncKeyState(kBoostUpVK) & 0x8000) != 0;
+			if (boostUpDown && !wasBoostUpKeyDown) {
+				float cur = g_thumbstickBoost.load(std::memory_order_relaxed);
+				float next = cur + kBoostStep;
+				if (next > kBoostMax) next = kBoostMax;
+				g_thumbstickBoost.store(next, std::memory_order_relaxed);
+				REX::INFO("thumbstick boost: {:.2f} -> {:.2f} (VK_F10)", cur, next);
+			}
+			wasBoostUpKeyDown = boostUpDown;
 
 			// === Gamepad chord ===
 			const auto reqButtons = g_lockGlyphsChordButtons.load(std::memory_order_relaxed);
@@ -880,12 +922,11 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 						// (mouse-scale × boosted_value) lands close to what
 						// gamepad-scale × raw_value would have produced.
 						//
-						// The factor is hardcoded for now; if it feels too
-						// fast or slow in-game, edit this constant and
-						// rebuild. INI exposure is a v6.1 todo.
-						constexpr float kThumbstickToMouseBoost = 5.0f;
-						*xValue *= kThumbstickToMouseBoost;
-						*yValue *= kThumbstickToMouseBoost;
+						// Boost factor is live-tunable via VK_F9 (-) and
+						// VK_F10 (+) hotkeys; see g_thumbstickBoost.
+						const float boost = g_thumbstickBoost.load(std::memory_order_relaxed);
+						*xValue *= boost;
+						*yValue *= boost;
 					}
 				}
 				return true;
