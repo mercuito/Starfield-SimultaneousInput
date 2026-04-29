@@ -767,21 +767,26 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 		vtbl.write_vfunc(
 			1,
 			+[](RE::PlayerControls::LookHandler*, RE::InputEvent* event) -> bool {
-				// QUserEvent() returns the user-event name as a BSFixedString;
-				// "Look" is the canonical look-input name. The old code went
-				// through RE::UserEvents::QLook() (an AL-id-resolved function
-				// returning the same string), which libxse does not surface;
-				// the literal compare is functionally identical and avoids the
-				// extra runtime lookup.
-				if (event->QUserEvent() != "Look"sv) {
-					return false;
+				// Slot 1 is correct (verified in IDA: dispatcher at
+				// Starfield.exe+0x22DD3F0 does `mov rax,[rcx]; call [rax+8]`).
+				// The previous body crashed because `event->QUserEvent() !=
+				// "Look"sv` triggered MSVC struct-return-via-hidden-arg for
+				// libxse's BSFixedString (non-trivial dtor), but the engine
+				// returns BSFixedString in rax. The convention mismatch
+				// corrupted state inside the engine on the first mouse click
+				// (rsi=0xFFFFFFFF in [rsi+10h]). Skip the QUserEvent compare;
+				// engine slot 9 + per-eventType vfuncs handle downstream
+				// filtering.
+				switch (event->eventType) {
+					case RE::InputEvent::EventType::kMouseMove:
+						UsingThumbstickLook = false;
+						return true;
+					case RE::InputEvent::EventType::kThumbstick:
+						UsingThumbstickLook = true;
+						return true;
+					default:
+						return false;
 				}
-				if (event->eventType == RE::InputEvent::EventType::kMouseMove) {
-					UsingThumbstickLook = false;
-				} else if (event->eventType == RE::InputEvent::EventType::kThumbstick) {
-					UsingThumbstickLook = true;
-				}
-				return true;
 			});
 		REX::INFO("vtable shim installed: LookHandler slot 1");
 		++g_hooksInstalled;
