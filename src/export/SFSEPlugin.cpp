@@ -292,10 +292,15 @@ bool IsUsingThumbstickLook(RE::BSInputDeviceManager*)
 }
 
 static constexpr std::uintptr_t kControlMapDataModelUpdateRVA = 0x255F2E0;
+static constexpr std::uintptr_t kPlatformDataModelUpdateRVA = 0x2560490;
 
 using ControlMapDataModelUpdate_t = void(void*);
+using PlatformDataModelUpdate_t = void(void*);
+using UIValueNotify_t = void(void*, bool);
 
 static std::atomic<std::uint32_t> g_controlMapGlyphLockCount{ 0 };
+static std::atomic<std::uint32_t> g_platformGlyphLockCount{ 0 };
+static constexpr std::uint32_t    kGamepadPlatform = 1;
 
 // ControlMapDataModel publishes PlatformData.uPlatform and ControlMapData to
 // Scaleform menus. While it updates, force the UI-only active-device decision
@@ -328,6 +333,44 @@ void ControlMapDataModelUpdateForGlyphLock(void* a_model)
 
 	REL::Relocation<ControlMapDataModelUpdate_t> original{ REL::Offset(kControlMapDataModelUpdateRVA) };
 	original(a_model);
+}
+
+// PlatformDataModel publishes the coarser "PC keyboard/mouse vs PC gamepad"
+// platform value. Some menu reloads refresh this model after ControlMapData,
+// so pin it as well or a load transition can overwrite controller glyph data
+// with keyboard layout until the process restarts.
+void PlatformDataModelUpdateForGlyphLock(void* a_model)
+{
+	REL::Relocation<PlatformDataModelUpdate_t> original{ REL::Offset(kPlatformDataModelUpdateRVA) };
+	original(a_model);
+
+	if (!g_lockControllerGlyphs.load(std::memory_order_relaxed)) {
+		return;
+	}
+
+	const auto count = g_platformGlyphLockCount.fetch_add(1, std::memory_order_relaxed);
+	if (count < 8) {
+		REX::INFO("glyph lock: PlatformDataModel update forced gamepad platform");
+	}
+
+	auto* modelBytes = static_cast<std::uint8_t*>(a_model);
+	auto* platformUiValueSource = modelBytes + 0x30;
+	const auto sourceVtable = *reinterpret_cast<std::uintptr_t**>(platformUiValueSource);
+	const auto getUiValue = reinterpret_cast<void* (*)(void*)>(sourceVtable[0x58 / sizeof(void*)]);
+	auto* platformUiValue = getUiValue(platformUiValueSource);
+	if (!platformUiValue) {
+		return;
+	}
+
+	auto* platform = reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(platformUiValue) + 0x18);
+	if (*platform == kGamepadPlatform) {
+		return;
+	}
+
+	*platform = kGamepadPlatform;
+	const auto valueVtable = *reinterpret_cast<std::uintptr_t**>(platformUiValue);
+	const auto notify = reinterpret_cast<UIValueNotify_t*>(valueVtable[0x48 / sizeof(void*)]);
+	notify(platformUiValue, true);
 }
 
 // For cursor visibility/style hooks: the cursor should follow the gamepad
@@ -1159,6 +1202,15 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 		++g_hooksInstalled;
 	} catch (const std::exception& ex) {
 		REX::ERROR("ControlMapDataModel update hook failed: {}", ex.what());
+		++g_hooksSkipped;
+	}
+	try {
+		REL::Relocation<std::uintptr_t> vtbl{ REL::Offset(0x4D837B0) };
+		vtbl.write_vfunc(1, PlatformDataModelUpdateForGlyphLock);
+		REX::INFO("vtable shim installed: PlatformDataModel update slot 1");
+		++g_hooksInstalled;
+	} catch (const std::exception& ex) {
+		REX::ERROR("PlatformDataModel update hook failed: {}", ex.what());
 		++g_hooksSkipped;
 	}
 
