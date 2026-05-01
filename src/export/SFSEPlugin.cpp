@@ -291,6 +291,45 @@ bool IsUsingThumbstickLook(RE::BSInputDeviceManager*)
 	return UsingThumbstickLook.load(std::memory_order_relaxed);
 }
 
+static constexpr std::uintptr_t kControlMapDataModelUpdateRVA = 0x255F2E0;
+
+using ControlMapDataModelUpdate_t = void(void*);
+
+static std::atomic<std::uint32_t> g_controlMapGlyphLockCount{ 0 };
+
+// ControlMapDataModel publishes PlatformData.uPlatform and ControlMapData to
+// Scaleform menus. While it updates, force the UI-only active-device decision
+// to gamepad, then restore the gameplay byte so camera sensitivity stays on
+// the per-event mirror.
+void ControlMapDataModelUpdateForGlyphLock(void* a_model)
+{
+	if (g_lockControllerGlyphs.load(std::memory_order_relaxed)) {
+		const auto count = g_controlMapGlyphLockCount.fetch_add(1, std::memory_order_relaxed);
+		if (count < 8) {
+			REX::INFO("glyph lock: ControlMapDataModel update forced gamepad UI data");
+		}
+
+		auto* modelBytes = static_cast<std::uint8_t*>(a_model);
+		const auto* flag = g_gamepadActiveFlag.load(std::memory_order_relaxed);
+		const std::uint8_t oldFlag = flag ? *flag : 0;
+		modelBytes[0x18] = 1;
+		if (flag) {
+			*const_cast<std::uint8_t*>(flag) = 1;
+		}
+
+		REL::Relocation<ControlMapDataModelUpdate_t> original{ REL::Offset(kControlMapDataModelUpdateRVA) };
+		original(a_model);
+
+		if (flag) {
+			*const_cast<std::uint8_t*>(flag) = oldFlag;
+		}
+		return;
+	}
+
+	REL::Relocation<ControlMapDataModelUpdate_t> original{ REL::Offset(kControlMapDataModelUpdateRVA) };
+	original(a_model);
+}
+
 // For cursor visibility/style hooks: the cursor should follow the gamepad
 // rules only when both (a) we're in thumbstick-look mode and (b) gamepad is
 // the currently-held active device. Mouse + gamepad held simultaneously falls
@@ -865,8 +904,9 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	// and (when trampoline=true) reserves trampoline space from SFSE's
 	// branch pool, falling back to a self-allocated trampoline.
 	//
-	// Trampoline budget: 32 bytes covers the two cursor trampoline calls.
-	// The 1.8.86-era
+	// Trampoline budget: each call replacement consumes branch-pool space.
+	// 96 bytes covers the four trigger helper calls and two cursor calls with
+	// margin. The 1.8.86-era
 	// Run_WindowsMessageLoop hook is no longer attempted because the
 	// underlying predicate call was refactored out of the message pump in
 	// 1.16.236; see MAINTAINING.md section 7. Bump this if we add hooks. We
@@ -878,7 +918,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	// get one consolidated log folder.
 	SFSE::Init(a_sfse, SFSE::InitInfo{
 		.trampoline = true,
-		.trampolineSize = 32,
+		.trampolineSize = 96,
 	});
 	LogRuntimeProbe(a_sfse);
 
@@ -1105,6 +1145,20 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 			"BSPCGamepadDevice::ExtendedPoll RT helper");
 	} catch (const std::exception& ex) {
 		REX::ERROR("trigger helper hook setup failed: {}", ex.what());
+		++g_hooksSkipped;
+	}
+
+	// === UI control-map data replacement ===
+	// ControlMapDataModel::Update publishes PlatformData.uPlatform and the
+	// mapped button events consumed by Starfield's Scaleform menu button bars.
+	// Pin only this UI data model to gamepad when glyph lock is enabled.
+	try {
+		REL::Relocation<std::uintptr_t> vtbl{ REL::Offset(0x4D83688) };
+		vtbl.write_vfunc(1, ControlMapDataModelUpdateForGlyphLock);
+		REX::INFO("vtable shim installed: ControlMapDataModel update slot 1");
+		++g_hooksInstalled;
+	} catch (const std::exception& ex) {
+		REX::ERROR("ControlMapDataModel update hook failed: {}", ex.what());
 		++g_hooksSkipped;
 	}
 
