@@ -554,6 +554,15 @@ namespace
 		const auto* material = a_impact.materialType;
 		ImpactRecord record{};
 		record.id = g_nextImpactRecordID.fetch_add(1, std::memory_order_relaxed);
+		// a_impact.collidee is a TESPointerHandle (transient uint32), not a
+		// persistent FormID. We deliberately store the raw handle here and defer
+		// resolution until the Papyrus lookup call: BSPointerHandle::get() acquires
+		// the engine handle-manager lock, and calling it from the projectile-update
+		// hook thread (where this StoreImpactRecord runs) deadlocks the engine.
+		// Confirmed: prior version that resolved here froze the game on first hit.
+		// Resolution happens in FindRecordIDForTarget()-style lookups, which are
+		// driven by Papyrus VM calls and run on a thread that doesn't already hold
+		// competing engine locks.
 		record.targetFormID = a_impact.collidee;
 		record.projectileFormID = FormIDOf(a_projectile);
 		record.weaponFormID = FormIDOf(a_projectile->weaponSource.object);
@@ -591,12 +600,25 @@ namespace
 		return std::nullopt;
 	}
 
+	// NOTE: record.targetFormID currently holds a raw TESPointerHandle (uint32),
+	// not a persistent FormID — see comment in StoreImpactRecord. To match
+	// records to the actor Papyrus passes us, we'd need to resolve the handle
+	// via BSPointerHandle::get(), but the AL ID for
+	// BSPointerHandleManagerInterface::GetSmartPointer is 0 (unwired) on
+	// Starfield 1.16.236 in current CommonLibSF, so calling get() crashes the
+	// game (see RE/IDs.h: GetSmartPointer{ 0 }; // 72432).
+	//
+	// Until the correct AL ID is found for 1.16.236, the lookups below compare
+	// handle-bits to formID-bits, which is structurally wrong and returns 0
+	// for almost every caller. They DO NOT crash — that's the only guarantee
+	// for now. Path forward: derive the right AL ID via IDA RE work, then we
+	// can resolve handle->refr->FormID and the lookups become correct.
+
 	[[nodiscard]] std::int32_t GetLatestImpactIdForTarget(std::monostate, RE::TESObjectREFR* a_target)
 	{
 		if (!a_target) {
 			return 0;
 		}
-
 		const auto targetFormID = FormIDOf(a_target);
 		std::int32_t latest = 0;
 		std::scoped_lock lock(g_impactRecordLock);
@@ -613,7 +635,6 @@ namespace
 		if (!a_target) {
 			return 0;
 		}
-
 		const auto targetFormID = FormIDOf(a_target);
 		std::int32_t latest = 0;
 		std::scoped_lock lock(g_impactRecordLock);
