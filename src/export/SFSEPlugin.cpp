@@ -31,6 +31,7 @@
 #include "RE/T/TESRace.h"
 
 #include <atomic>
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <charconv>
@@ -118,6 +119,12 @@ namespace
 	std::atomic<unsigned> g_hooksSkipped{ 0 };
 	std::atomic<std::uint32_t> g_projectileImpactLogCount{ 0 };
 	std::atomic<std::uint32_t> g_hitEventLogCount{ 0 };
+
+	// Shutdown signal for the hotkey/chord poll thread. Set from DllMain on
+	// DLL_PROCESS_DETACH; the loop polls this each iteration and exits cleanly,
+	// preventing process-hang on game shutdown when the CRT tears down while
+	// the detached thread is mid-Sleep().
+	std::atomic<bool> g_pollThreadShutdown{ false };
 
 	// === Runtime configuration (SimultaneousInput.ini) ===
 	//
@@ -232,6 +239,8 @@ namespace
 	constexpr std::uint32_t kProjectileImpactLogLimit = 512;
 	constexpr std::size_t kProjectileVirtualTraceSlot = 0x156;
 	constexpr std::size_t kRuntimeProjectileUpdateSlot = 0x13A;
+	constexpr bool kEnableHitImpactHooks = true;
+	constexpr bool kEnableImpactPapyrusNatives = true;
 
 	ProcessProjectileImpactEffect_t* g_processProjectileImpactEffect = nullptr;
 	MissileProjectileUpdate_t* g_missileProjectileUpdate = nullptr;
@@ -509,6 +518,7 @@ namespace
 	struct ImpactRecord
 	{
 		std::int32_t id{ 0 };
+		std::uint32_t targetHandle{ 0 };
 		std::uint32_t targetFormID{ 0 };
 		std::uint32_t projectileFormID{ 0 };
 		std::uint32_t weaponFormID{ 0 };
@@ -533,10 +543,38 @@ namespace
 	std::array<ImpactRecord, kImpactRecordBufferSize> g_impactRecords{};
 	std::uint32_t g_impactRecordWriteIndex{ 0 };
 	std::atomic<std::int32_t> g_nextImpactRecordID{ 1 };
+	std::atomic<std::uint32_t> g_impactPollMissLogCount{ 0 };
 
 	[[nodiscard]] std::uint32_t SmallCollisionID(std::uintptr_t a_value)
 	{
 		return a_value <= 0xFFFFFFFFu ? static_cast<std::uint32_t>(a_value) : 0xFFFFFFFFu;
+	}
+
+	struct TargetIdentity
+	{
+		std::uint32_t formID{ 0 };
+		std::uint32_t nativeHandle{ 0 };
+	};
+
+	[[nodiscard]] TargetIdentity GetTargetIdentity(const RE::TESObjectREFR* a_target)
+	{
+		if (!a_target) {
+			return {};
+		}
+
+		return {
+			.formID = FormIDOf(a_target),
+			.nativeHandle = a_target->nativeHandle,
+		};
+	}
+
+	[[nodiscard]] bool ImpactMatchesTarget(const ImpactRecord& a_record, const TargetIdentity& a_target)
+	{
+		if (a_record.targetHandle != 0 && a_record.targetHandle == a_target.nativeHandle) {
+			return true;
+		}
+
+		return a_record.targetFormID != 0 && a_record.targetFormID == a_target.formID;
 	}
 
 	void StoreImpactRecord(
@@ -554,16 +592,10 @@ namespace
 		const auto* material = a_impact.materialType;
 		ImpactRecord record{};
 		record.id = g_nextImpactRecordID.fetch_add(1, std::memory_order_relaxed);
-		// a_impact.collidee is a TESPointerHandle (transient uint32), not a
-		// persistent FormID. We deliberately store the raw handle here and defer
-		// resolution until the Papyrus lookup call: BSPointerHandle::get() acquires
-		// the engine handle-manager lock, and calling it from the projectile-update
-		// hook thread (where this StoreImpactRecord runs) deadlocks the engine.
-		// Confirmed: prior version that resolved here froze the game on first hit.
-		// Resolution happens in FindRecordIDForTarget()-style lookups, which are
-		// driven by Papyrus VM calls and run on a thread that doesn't already hold
-		// competing engine locks.
-		record.targetFormID = a_impact.collidee;
+		// a_impact.collidee is a TESPointerHandle, not a persistent FormID.
+		// TESObjectREFR inherits TESForm::nativeHandle, which is the same handle
+		// domain exposed on the Papyrus target after native argument unpacking.
+		record.targetHandle = a_impact.collidee;
 		record.projectileFormID = FormIDOf(a_projectile);
 		record.weaponFormID = FormIDOf(a_projectile->weaponSource.object);
 		record.ammoFormID = FormIDOf(a_projectile->ammoSource);
@@ -619,13 +651,33 @@ namespace
 		if (!a_target) {
 			return 0;
 		}
-		const auto targetFormID = FormIDOf(a_target);
+		const auto target = GetTargetIdentity(a_target);
 		std::int32_t latest = 0;
 		std::scoped_lock lock(g_impactRecordLock);
 		for (const auto& record : g_impactRecords) {
-			if (record.actorSkin && record.targetFormID == targetFormID && record.id > latest) {
+			if (record.actorSkin && ImpactMatchesTarget(record, target) && record.id > latest) {
 				latest = record.id;
 			}
+		}
+		if (latest == 0) {
+			const auto logIndex = g_impactPollMissLogCount.fetch_add(1, std::memory_order_relaxed);
+			if (logIndex >= 32) {
+				return latest;
+			}
+			const auto newest = std::max_element(
+				g_impactRecords.begin(),
+				g_impactRecords.end(),
+				[](const ImpactRecord& a_lhs, const ImpactRecord& a_rhs) {
+					return a_lhs.id < a_rhs.id;
+				});
+			REX::INFO(
+				"impact-poll: no ActorSkin impact for target form={:08X} nativeHandle={:08X}; newest id={} targetHandle={:08X} material={:08X} node='{}'",
+				target.formID,
+				target.nativeHandle,
+				newest != g_impactRecords.end() ? newest->id : 0,
+				newest != g_impactRecords.end() ? newest->targetHandle : 0,
+				newest != g_impactRecords.end() ? newest->materialFormID : 0,
+				newest != g_impactRecords.end() ? newest->node : "");
 		}
 		return latest;
 	}
@@ -635,12 +687,31 @@ namespace
 		if (!a_target) {
 			return 0;
 		}
-		const auto targetFormID = FormIDOf(a_target);
+		const auto target = GetTargetIdentity(a_target);
 		std::int32_t latest = 0;
 		std::scoped_lock lock(g_impactRecordLock);
 		for (const auto& record : g_impactRecords) {
-			if (record.targetFormID == targetFormID && record.id > latest) {
+			if (ImpactMatchesTarget(record, target) && record.id > latest) {
 				latest = record.id;
+			}
+		}
+		if (latest == 0) {
+			const auto logIndex = g_impactPollMissLogCount.fetch_add(1, std::memory_order_relaxed);
+			if (logIndex < 32) {
+				const auto newest = std::max_element(
+					g_impactRecords.begin(),
+					g_impactRecords.end(),
+					[](const ImpactRecord& a_lhs, const ImpactRecord& a_rhs) {
+						return a_lhs.id < a_rhs.id;
+					});
+				REX::INFO(
+					"impact-poll-any: no impact for target form={:08X} nativeHandle={:08X}; newest id={} targetHandle={:08X} material={:08X} node='{}'",
+					target.formID,
+					target.nativeHandle,
+					newest != g_impactRecords.end() ? newest->id : 0,
+					newest != g_impactRecords.end() ? newest->targetHandle : 0,
+					newest != g_impactRecords.end() ? newest->materialFormID : 0,
+					newest != g_impactRecords.end() ? newest->node : "");
 			}
 		}
 		return latest;
@@ -649,7 +720,7 @@ namespace
 	[[nodiscard]] bool IsImpactForTarget(std::monostate, std::int32_t a_impactID, RE::TESObjectREFR* a_target)
 	{
 		const auto record = FindImpactRecord(a_impactID);
-		return record && a_target && record->targetFormID == FormIDOf(a_target);
+		return record && a_target && ImpactMatchesTarget(*record, GetTargetIdentity(a_target));
 	}
 
 	[[nodiscard]] bool IsImpactActorSkin(std::monostate, std::int32_t a_impactID)
@@ -724,7 +795,12 @@ namespace
 		return record ? record->normal.z : 0.0f;
 	}
 
-	std::vector<std::unique_ptr<RE::BSScript::IFunction>> g_impactNativeFunctions;
+	// Papyrus native binding has no public unregister path. The VM keeps
+	// references to these IFunction objects after BindNativeMethod(), so do not
+	// let a global container destructor tear them down during DLL unload.
+	// Intentionally leak this process-lifetime storage; the OS reclaims it when
+	// Starfield exits.
+	auto* g_impactNativeFunctions = new std::vector<std::unique_ptr<RE::BSScript::IFunction>>();
 
 	template <class Fn>
 	bool BindImpactNative(RE::BSScript::IVirtualMachine& a_vm, std::string_view a_name, Fn a_fn)
@@ -742,7 +818,7 @@ namespace
 			return false;
 		}
 
-		g_impactNativeFunctions.push_back(std::move(function));
+		g_impactNativeFunctions->push_back(std::move(function));
 		return true;
 	}
 
@@ -2062,7 +2138,7 @@ namespace
 			return static_cast<unsigned long long>(::GetTickCount64());
 		};
 
-		for (;;) {
+		while (!g_pollThreadShutdown.load(std::memory_order_relaxed)) {
 			// === KBM hotkey ===
 			const int vk = g_lockGlyphsHotkey.load(std::memory_order_relaxed);
 			if (vk > 0) {
@@ -2118,7 +2194,12 @@ namespace
 				chordWasSatisfied = satisfied;
 			}
 
-			::Sleep(50);
+			// Sleep in 10ms chunks so shutdown is observed within ~10ms instead
+			// of waiting for the full 50ms poll period. Helps the process exit
+			// promptly when the CRT starts tearing down.
+			for (int slept = 0; slept < 50 && !g_pollThreadShutdown.load(std::memory_order_relaxed); slept += 10) {
+				::Sleep(10);
+			}
 		}
 	}
 
@@ -2226,30 +2307,38 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	// hooks target a refcount Release function, not a predicate).
 	InitGamepadActiveFlag();
 
-	// First milestone for the hit-location work: trace the native projectile
-	// impact effect/decal path while the runtime ImpactData record is still
-	// live. This keeps raw NiAVObject pointers frame-local and copies only
-	// IDs/names into the log for validation.
-	InstallProjectileImpactHooks();
-
-	// Defer Papyrus native registration to kPostDataLoad — at SFSEPlugin_Load
-	// time the GameVM singleton is still null, so RegisterImpactPapyrusFunctions
-	// must run after the engine has finished bringing the VM up. Confirmed in
-	// Starfield 1.16.236: registering at load time produces
-	// "Papyrus impact native registration failed: GameVM/VM unavailable" and
-	// no natives bind. kPostDataLoad fires after data files load and the VM
-	// has bound vanilla scripts, which is the right window to add ours.
-	if (auto* messaging = SFSE::GetMessagingInterface()) {
-		messaging->RegisterListener([](SFSE::MessagingInterface::Message* a_msg) {
-			if (a_msg && a_msg->type == SFSE::MessagingInterface::kPostDataLoad) {
-				REX::INFO("SFSE message kPostDataLoad received; registering Papyrus impact natives");
-				RegisterImpactPapyrusFunctions();
-			}
-		});
-		REX::INFO("Papyrus impact native registration deferred to kPostDataLoad");
+	if constexpr (kEnableHitImpactHooks) {
+		// First milestone for the hit-location work: trace the native projectile
+		// impact effect/decal path while the runtime ImpactData record is still
+		// live. This keeps raw NiAVObject pointers frame-local and copies only
+		// IDs/names into the log for validation.
+		InstallProjectileImpactHooks();
 	} else {
-		REX::ERROR("SFSE messaging interface unavailable; falling back to immediate native registration (will likely fail)");
-		RegisterImpactPapyrusFunctions();
+		REX::INFO("hit-impact projectile hooks disabled for shutdown isolation build");
+	}
+
+	if constexpr (kEnableImpactPapyrusNatives) {
+		// Defer Papyrus native registration to kPostDataLoad — at SFSEPlugin_Load
+		// time the GameVM singleton is still null, so RegisterImpactPapyrusFunctions
+		// must run after the engine has finished bringing the VM up. Confirmed in
+		// Starfield 1.16.236: registering at load time produces
+		// "Papyrus impact native registration failed: GameVM/VM unavailable" and
+		// no natives bind. kPostDataLoad fires after data files load and the VM
+		// has bound vanilla scripts, which is the right window to add ours.
+		if (auto* messaging = SFSE::GetMessagingInterface()) {
+			messaging->RegisterListener([](SFSE::MessagingInterface::Message* a_msg) {
+				if (a_msg && a_msg->type == SFSE::MessagingInterface::kPostDataLoad) {
+					REX::INFO("SFSE message kPostDataLoad received; registering Papyrus impact natives");
+					RegisterImpactPapyrusFunctions();
+				}
+			});
+			REX::INFO("Papyrus impact native registration deferred to kPostDataLoad");
+		} else {
+			REX::ERROR("SFSE messaging interface unavailable; falling back to immediate native registration (will likely fail)");
+			RegisterImpactPapyrusFunctions();
+		}
+	} else {
+		REX::INFO("hit-impact Papyrus natives disabled for shutdown isolation build");
 	}
 
 	// === Vtable shim: split look input by event type ===
@@ -2524,4 +2613,34 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	// is better than refusing to load. Logged warnings tell the user what's
 	// off.
 	return true;
+}
+
+// Process-wide entry point. Required to signal the detached hotkey/chord
+// poll thread to exit on game shutdown — without this, the loop spins
+// inside ::Sleep() while the CRT tears down, and the Starfield process
+// hangs as a zombie holding the DLL file lock (preventing deploy-on-rebuild
+// without a forced taskkill). On DLL_PROCESS_ATTACH we just opt out of
+// thread-attach/detach callbacks for perf; on DLL_PROCESS_DETACH we flip
+// the shutdown flag and the poll thread observes it within ~10ms.
+//
+// Types forward-declared because the file deliberately avoids <windows.h>
+// (see comment block above). Values match windows.h:
+//   DLL_PROCESS_DETACH = 0, DLL_PROCESS_ATTACH = 1
+extern "C" __declspec(dllimport) int __stdcall DisableThreadLibraryCalls(void*);
+
+extern "C" int __stdcall DllMain(void* a_module, unsigned long a_reason, void* /*a_reserved*/)
+{
+	constexpr unsigned long kProcessDetach = 0;
+	constexpr unsigned long kProcessAttach = 1;
+	switch (a_reason) {
+	case kProcessAttach:
+		::DisableThreadLibraryCalls(a_module);
+		break;
+	case kProcessDetach:
+		g_pollThreadShutdown.store(true, std::memory_order_relaxed);
+		break;
+	default:
+		break;
+	}
+	return 1;
 }
