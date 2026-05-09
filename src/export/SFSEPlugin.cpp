@@ -11,21 +11,43 @@
 
 #include "REX/LOG.h"
 
+#include "RE/A/Actor.h"
+#include "RE/A/Array.h"
+#include "RE/B/BGSBodyPartData.h"
 #include "RE/B/BSFixedString.h"
 #include "RE/B/BSInputEventUser.h"
+#include "RE/B/BSScriptUtil.h"
+#include "RE/B/BSTEvent.h"
+#include "RE/B/BGSBodyPartDefs.h"
+#include "RE/B/BGSMaterialType.h"
+#include "RE/G/GameVM.h"
+#include "RE/N/NiAVObject.h"
+#include "RE/N/NiPoint.h"
+#include "RE/P/Projectile.h"
+#include "RE/T/TBO_InstanceData.h"
+#include "RE/T/TESAmmo.h"
+#include "RE/T/TESForm.h"
+#include "RE/T/TESNPC.h"
+#include "RE/T/TESRace.h"
 
 #include <atomic>
+#include <array>
 #include <cctype>
 #include <charconv>
+#include <cstring>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <source_location>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <variant>
+#include <vector>
 
 // We need a small slice of Win32 + XInput to drive the config loader and
 // hotkey/chord poll thread. Including <windows.h> / <xinput.h> here
@@ -94,6 +116,8 @@ namespace
 	// debugger).
 	std::atomic<unsigned> g_hooksInstalled{ 0 };
 	std::atomic<unsigned> g_hooksSkipped{ 0 };
+	std::atomic<std::uint32_t> g_projectileImpactLogCount{ 0 };
+	std::atomic<std::uint32_t> g_hitEventLogCount{ 0 };
 
 	// === Runtime configuration (SimultaneousInput.ini) ===
 	//
@@ -125,6 +149,1208 @@ namespace
 	std::atomic<bool>     g_lockGlyphsChordLT{ false };
 	std::atomic<bool>     g_lockGlyphsChordRT{ false };
 	std::atomic<unsigned> g_lockGlyphsChordHoldMs{ 500 };
+}
+
+namespace
+{
+	using ProcessProjectileImpactEffect_t = void(RE::Projectile*, RE::Projectile::ImpactData*);
+	using MissileProjectileUpdate_t = void(RE::Projectile*, float);
+	using RuntimeImpactProcess_t = bool(RE::Projectile*, bool);
+	using ProjectileVirtualTrace_t = std::uintptr_t(RE::Projectile*, void*);
+
+	struct RuntimeImpactTraceState
+	{
+		std::uintptr_t projectile{ 0 };
+		std::uintptr_t impactData{ 0 };
+		std::uint32_t  projectileFormID{ 0 };
+		std::uint32_t  processedTransitions{ 0 };
+		bool           seenInitial{ false };
+		bool           seenProcessed{ false };
+		bool           seenEffectSpawned{ false };
+	};
+
+	struct ProjectileVirtualTraceHook
+	{
+		std::uintptr_t          vtableRVA;
+		const char*             name;
+		std::uintptr_t          vtable{ 0 };
+		ProjectileVirtualTrace_t* original{ nullptr };
+	};
+
+	struct ProjectileUpdateTraceHook
+	{
+		std::uintptr_t           vtableRVA;
+		const char*              name;
+		std::uintptr_t           vtable{ 0 };
+		MissileProjectileUpdate_t* original{ nullptr };
+	};
+
+	struct HitTraceDamageImpactData
+	{
+		RE::NiPoint3A location;  // 00
+		RE::NiPoint3A normal;    // 10
+		RE::NiPoint3A velocity;  // 20
+		RE::NiPointer<RE::bhkNPCollisionObject> colObj;  // 30
+	};
+	static_assert(sizeof(HitTraceDamageImpactData) == 0x40);
+
+	struct HitTraceHitData
+	{
+		HitTraceDamageImpactData impactData;      // 00
+		RE::BSPointerHandle<RE::Actor> aggressor; // 40
+		RE::BSPointerHandle<RE::Actor> target;    // 44
+		RE::BSPointerHandle<RE::TESObjectREFR> sourceRef; // 48
+		std::uint64_t attackData;                 // 50
+		RE::TESForm* weapon;                      // 58 - TESObjectWEAP*
+		void* weaponInstanceData;                 // 60
+		void* criticalEffect;                     // 68 - SpellItem*
+		void* hitEffect;                          // 70 - SpellItem*
+		std::uint64_t unk78;                      // 78
+		const RE::TESAmmo* ammo;                  // 80
+		std::byte pad88[0x5C];                    // 88
+		REX::TEnum<RE::BGSBodyPartDefs::LIMB_ENUM> damageLimb; // E4
+		std::byte padE8[0x8];                     // E8
+	};
+	static_assert(sizeof(HitTraceHitData) == 0xF0);
+
+	struct HitTraceTESHitEvent
+	{
+		HitTraceHitData hitData;              // 000
+		RE::NiPointer<RE::TESObjectREFR> target; // 0F0
+		RE::NiPointer<RE::TESObjectREFR> cause;  // 0F8
+		RE::BSFixedString material;          // 100
+		RE::TESFormID sourceFormID;          // 108
+		RE::TESFormID projectileFormID;      // 10C
+		bool usesHitData;                    // 110
+	};
+	static_assert(sizeof(HitTraceTESHitEvent) == 0x120);
+
+	constexpr std::uintptr_t kProcessProjectileImpactEffectRVA = 0x1B3DB70;
+	constexpr std::uintptr_t kMissileProjectileUpdateRVA = 0x1B34B90;
+	constexpr std::uintptr_t kRuntimeImpactProcessRVA = 0x1B0BDF0;
+	constexpr REL::ID kTESHitEventGetEventSourceID{ 34450 };
+	constexpr std::uint32_t kProjectileImpactLogLimit = 512;
+	constexpr std::size_t kProjectileVirtualTraceSlot = 0x156;
+	constexpr std::size_t kRuntimeProjectileUpdateSlot = 0x13A;
+
+	ProcessProjectileImpactEffect_t* g_processProjectileImpactEffect = nullptr;
+	MissileProjectileUpdate_t* g_missileProjectileUpdate = nullptr;
+	RuntimeImpactProcess_t* g_runtimeImpactProcess = nullptr;
+	std::atomic<std::uint32_t> g_projectileVirtualTraceLogCount{ 0 };
+	std::atomic<std::uint32_t> g_runtimeImpactProcessTraceCount{ 0 };
+	std::array<RuntimeImpactTraceState, 64> g_runtimeImpactTraceStates{};
+	std::uint32_t g_runtimeImpactTraceCursor{ 0 };
+
+	std::array<ProjectileVirtualTraceHook, 10> g_projectileVirtualTraceHooks{ {
+		{ 0x4CD4B90, "Projectile" },
+		{ 0x4CD3608, "MissileProjectile" },
+		{ 0x4CCC108, "ArrowProjectile" },
+		{ 0x4CD1268, "GrenadeProjectile" },
+		{ 0x4CCDB40, "BeamProjectile" },
+		{ 0x4CD0588, "FlameProjectile" },
+		{ 0x4CCE8C8, "ConeProjectile" },
+		{ 0x4C30998, "PlasmaProjectile" },
+		{ 0x4CCCDF0, "BarrierProjectile" },
+		{ 0x4C31708, "EmitterProjectile" },
+	} };
+
+	std::array<ProjectileUpdateTraceHook, 5> g_projectileUpdateTraceHooks{ {
+		{ 0x4CCDC58, "RuntimeShotProjectile" },
+		{ 0x4CD3608, "MissileProjectile" },
+		{ 0x4CCDB40, "BeamProjectile" },
+		{ 0x4CD0588, "FlameProjectile" },
+		{ 0x4CD1268, "GrenadeProjectile" },
+	} };
+
+	[[nodiscard]] std::uintptr_t StarfieldBase()
+	{
+		static const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleA(nullptr));
+		return base;
+	}
+
+	[[nodiscard]] std::uint32_t FormIDOf(const RE::TESForm* a_form)
+	{
+		return a_form ? a_form->GetFormID() : 0;
+	}
+
+	template <class T>
+	[[nodiscard]] std::uint32_t HandleValue(RE::BSPointerHandle<T> a_handle)
+	{
+		return a_handle.get_handle();
+	}
+
+	[[nodiscard]] std::uintptr_t ReadQword(const void* a_base, std::ptrdiff_t a_offset)
+	{
+		return *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<std::uintptr_t>(a_base) + a_offset);
+	}
+
+	[[nodiscard]] bool TryReadQword(const void* a_base, std::ptrdiff_t a_offset, std::uintptr_t& a_out)
+	{
+		__try {
+			a_out = ReadQword(a_base, a_offset);
+			return true;
+		} __except (1) {
+			a_out = 0;
+			return false;
+		}
+	}
+
+	[[nodiscard]] std::uintptr_t RvaOf(std::uintptr_t a_address)
+	{
+		const auto base = StarfieldBase();
+		return a_address >= base ? a_address - base : 0;
+	}
+
+	void LogCollisionBodyRecord(std::uint32_t a_logIndex, const char* a_phase, const char* a_eventName, const char* a_label, const void* a_body)
+	{
+		if (!a_body) {
+			return;
+		}
+
+		std::array<std::uintptr_t, 17> fields{};
+		for (std::size_t i = 0; i < fields.size(); ++i) {
+			if (!TryReadQword(a_body, static_cast<std::ptrdiff_t>(i * sizeof(std::uintptr_t)), fields[i])) {
+				REX::INFO(
+					"impact-body[{}:{}:{}:{}]: body={:p} unreadable at +{:#x}",
+					a_logIndex,
+					a_phase,
+					a_eventName,
+					a_label,
+					a_body,
+					i * sizeof(std::uintptr_t));
+				return;
+			}
+		}
+
+		REX::INFO(
+			"impact-body[{}:{}:{}:{}]: body={:p} "
+			"q00={:#x} q08={:#x} q10={:#x} q18={:#x} q20={:#x} q28={:#x} q30={:#x} q38={:#x} "
+			"q40={:#x} q48={:#x} q50={:#x} q58={:#x} q60={:#x} q68={:#x} q70={:#x} q78={:#x} q80={:#x}",
+			a_logIndex,
+			a_phase,
+			a_eventName,
+			a_label,
+			a_body,
+			fields[0],
+			fields[1],
+			fields[2],
+			fields[3],
+			fields[4],
+			fields[5],
+			fields[6],
+			fields[7],
+			fields[8],
+			fields[9],
+			fields[10],
+			fields[11],
+			fields[12],
+			fields[13],
+			fields[14],
+			fields[15],
+			fields[16]);
+	}
+
+	[[nodiscard]] const char* NameOf(const RE::NiAVObject* a_object)
+	{
+		if (!a_object) {
+			return "<none>";
+		}
+
+		const auto* name = a_object->name.c_str();
+		return name ? name : "<unnamed>";
+	}
+
+	[[nodiscard]] const char* LimbName(std::int32_t a_limb)
+	{
+		using LIMB = RE::BGSBodyPartDefs::LIMB_ENUM;
+
+		switch (static_cast<LIMB>(a_limb)) {
+		case LIMB::kNone:
+			return "None";
+		case LIMB::kTorso:
+			return "Torso";
+		case LIMB::kHead1:
+			return "Head1";
+		case LIMB::kEye1:
+			return "Eye1";
+		case LIMB::kLookAt1:
+			return "LookAt1";
+		case LIMB::kFlyGrab:
+			return "FlyGrab";
+		case LIMB::kHead2:
+			return "Head2";
+		case LIMB::kLeftArm1:
+			return "LeftArm1";
+		case LIMB::kLeftArm2:
+			return "LeftArm2";
+		case LIMB::kRightArm1:
+			return "RightArm1";
+		case LIMB::kRightArm2:
+			return "RightArm2";
+		case LIMB::kLeftLeg1:
+			return "LeftLeg1";
+		case LIMB::kLeftLeg2:
+			return "LeftLeg2";
+		case LIMB::kLeftLeg3:
+			return "LeftLeg3";
+		case LIMB::kRightLeg1:
+			return "RightLeg1";
+		case LIMB::kRightLeg2:
+			return "RightLeg2";
+		case LIMB::kRightLeg3:
+			return "RightLeg3";
+		case LIMB::kBrain:
+			return "Brain";
+		case LIMB::kWeapon:
+			return "Weapon";
+		case LIMB::kRoot:
+			return "Root";
+		case LIMB::kCom:
+			return "Com";
+		case LIMB::kPelvis:
+			return "Pelvis";
+		case LIMB::kCamera:
+			return "Camera";
+		case LIMB::kOffsetRoot:
+			return "OffsetRoot";
+		case LIMB::kLeftFoot:
+			return "LeftFoot";
+		case LIMB::kRightFoot:
+			return "RightFoot";
+		case LIMB::kFaceTargetSource:
+			return "FaceTargetSource";
+		default:
+			return "Unknown";
+		}
+	}
+
+	struct PapyrusNodeGuess
+	{
+		const char* primary{ "" };
+		const char* alternate{ "" };
+		const char* confidence{ "none" };
+	};
+
+	[[nodiscard]] PapyrusNodeGuess GuessPapyrusNode(std::int32_t a_limb, std::uint64_t a_collisionIdA, std::uint64_t a_collisionIdB)
+	{
+		using LIMB = RE::BGSBodyPartDefs::LIMB_ENUM;
+
+		const auto hasCollisionID = [a_collisionIdA, a_collisionIdB](std::uint64_t a_value) {
+			return a_collisionIdA == a_value || a_collisionIdB == a_value;
+		};
+		const auto hasCollisionIDs = [a_collisionIdA, a_collisionIdB](std::uint64_t a_first, std::uint64_t a_second) {
+			return (a_collisionIdA == a_first && a_collisionIdB == a_second) ||
+			       (a_collisionIdA == a_second && a_collisionIdB == a_first);
+		};
+
+		switch (static_cast<LIMB>(a_limb)) {
+		case LIMB::kHead1:
+		case LIMB::kHead2:
+		case LIMB::kBrain:
+			return { "C_Head", "C_Neck", "limb-direct" };
+		case LIMB::kTorso:
+			return { "C_Spine", "C_Chest", "limb-direct" };
+		case LIMB::kLeftArm1:
+		case LIMB::kLeftArm2:
+			if (hasCollisionID(0x12)) {
+				return { "L_Wrist", "L_Biceps", "collision-hand-candidate" };
+			}
+			if (hasCollisionID(0x9)) {
+				return { "L_Biceps", "L_Wrist", "collision-upper-candidate" };
+			}
+			return { "L_Biceps", "L_Wrist", "limb-broad" };
+		case LIMB::kRightArm1:
+		case LIMB::kRightArm2:
+			if (hasCollisionID(0x13)) {
+				return { "R_Wrist", "R_Biceps", "collision-hand-candidate" };
+			}
+			if (hasCollisionID(0xb) && hasCollisionID(0xc)) {
+				return { "R_Biceps", "R_Wrist", "collision-upper-candidate" };
+			}
+			return { "R_Biceps", "R_Wrist", "limb-broad" };
+		case LIMB::kLeftFoot:
+			return { "L_Foot", "L_Thigh", "limb-direct" };
+		case LIMB::kRightFoot:
+			return { "R_Foot", "R_Thigh", "limb-direct" };
+		case LIMB::kLeftLeg1:
+		case LIMB::kLeftLeg2:
+		case LIMB::kLeftLeg3:
+			if (hasCollisionIDs(0x4, 0xe)) {
+				return { "L_Thigh", "L_Foot", "collision-upper-candidate" };
+			}
+			if (hasCollisionIDs(0x4, 0x7) || hasCollisionIDs(0x7, 0xd)) {
+				return { "L_Foot", "L_Thigh", "collision-lower-candidate" };
+			}
+			return { "L_Thigh", "L_Foot", "limb-broad" };
+		case LIMB::kRightLeg1:
+		case LIMB::kRightLeg2:
+		case LIMB::kRightLeg3:
+			// Early empirical shotgun data shows right lower-leg hits involving ID 0x8.
+			if (hasCollisionID(0x8)) {
+				return { "R_Foot", "R_Thigh", "collision-lower-candidate" };
+			}
+			if (hasCollisionID(0x5)) {
+				return { "R_Thigh", "R_Foot", "collision-upper-candidate" };
+			}
+			return { "R_Thigh", "R_Foot", "limb-broad" };
+		case LIMB::kPelvis:
+			return { "C_Spine", "C_Chest", "limb-broad" };
+		case LIMB::kRoot:
+			return { "Root", "C_Spine", "limb-direct" };
+		case LIMB::kCom:
+			return { "COM", "Root", "limb-direct" };
+		case LIMB::kCamera:
+			return { "Camera", "C_Head", "limb-direct" };
+		default:
+			return { "C_Spine", "C_Chest", "fallback" };
+		}
+	}
+
+	struct ImpactRecord
+	{
+		std::int32_t id{ 0 };
+		std::uint32_t targetFormID{ 0 };
+		std::uint32_t projectileFormID{ 0 };
+		std::uint32_t weaponFormID{ 0 };
+		std::uint32_t ammoFormID{ 0 };
+		std::uint32_t materialFormID{ 0 };
+		std::int32_t damageLimb{ -1 };
+		std::uint32_t collisionLayer{ 0 };
+		std::uint32_t collisionIdA{ 0xFFFFFFFFu };
+		std::uint32_t collisionIdB{ 0xFFFFFFFFu };
+		RE::NiPoint3 position{};
+		RE::NiPoint3 normal{};
+		const char* node{ "" };
+		const char* alternateNode{ "" };
+		const char* confidence{ "" };
+		bool actorSkin{ false };
+	};
+
+	constexpr std::uint32_t kActorSkinMaterialFormID = 0x00022954;
+	constexpr std::size_t kImpactRecordBufferSize = 128;
+
+	std::mutex g_impactRecordLock;
+	std::array<ImpactRecord, kImpactRecordBufferSize> g_impactRecords{};
+	std::uint32_t g_impactRecordWriteIndex{ 0 };
+	std::atomic<std::int32_t> g_nextImpactRecordID{ 1 };
+
+	[[nodiscard]] std::uint32_t SmallCollisionID(std::uintptr_t a_value)
+	{
+		return a_value <= 0xFFFFFFFFu ? static_cast<std::uint32_t>(a_value) : 0xFFFFFFFFu;
+	}
+
+	void StoreImpactRecord(
+		const RE::Projectile* a_projectile,
+		const RE::Projectile::ImpactData& a_impact,
+		std::int32_t a_damageLimb,
+		std::uintptr_t a_collisionIdA,
+		std::uintptr_t a_collisionIdB,
+		const PapyrusNodeGuess& a_nodeGuess)
+	{
+		if (!a_projectile) {
+			return;
+		}
+
+		const auto* material = a_impact.materialType;
+		ImpactRecord record{};
+		record.id = g_nextImpactRecordID.fetch_add(1, std::memory_order_relaxed);
+		record.targetFormID = a_impact.collidee;
+		record.projectileFormID = FormIDOf(a_projectile);
+		record.weaponFormID = FormIDOf(a_projectile->weaponSource.object);
+		record.ammoFormID = FormIDOf(a_projectile->ammoSource);
+		record.materialFormID = FormIDOf(material);
+		record.damageLimb = a_damageLimb;
+		record.collisionLayer = static_cast<std::uint32_t>(a_impact.collisionLayer.underlying());
+		record.collisionIdA = SmallCollisionID(a_collisionIdA);
+		record.collisionIdB = SmallCollisionID(a_collisionIdB);
+		record.position = a_impact.location.position;
+		record.normal = a_impact.normal;
+		record.node = a_nodeGuess.primary;
+		record.alternateNode = a_nodeGuess.alternate;
+		record.confidence = a_nodeGuess.confidence;
+		record.actorSkin = record.materialFormID == kActorSkinMaterialFormID;
+
+		{
+			std::scoped_lock lock(g_impactRecordLock);
+			g_impactRecords[g_impactRecordWriteIndex++ % g_impactRecords.size()] = record;
+		}
+	}
+
+	[[nodiscard]] std::optional<ImpactRecord> FindImpactRecord(std::int32_t a_impactID)
+	{
+		if (a_impactID <= 0) {
+			return std::nullopt;
+		}
+
+		std::scoped_lock lock(g_impactRecordLock);
+		for (const auto& record : g_impactRecords) {
+			if (record.id == a_impactID) {
+				return record;
+			}
+		}
+		return std::nullopt;
+	}
+
+	[[nodiscard]] std::int32_t GetLatestImpactIdForTarget(std::monostate, RE::TESObjectREFR* a_target)
+	{
+		if (!a_target) {
+			return 0;
+		}
+
+		const auto targetFormID = FormIDOf(a_target);
+		std::int32_t latest = 0;
+		std::scoped_lock lock(g_impactRecordLock);
+		for (const auto& record : g_impactRecords) {
+			if (record.actorSkin && record.targetFormID == targetFormID && record.id > latest) {
+				latest = record.id;
+			}
+		}
+		return latest;
+	}
+
+	[[nodiscard]] std::int32_t GetLatestAnyImpactIdForTarget(std::monostate, RE::TESObjectREFR* a_target)
+	{
+		if (!a_target) {
+			return 0;
+		}
+
+		const auto targetFormID = FormIDOf(a_target);
+		std::int32_t latest = 0;
+		std::scoped_lock lock(g_impactRecordLock);
+		for (const auto& record : g_impactRecords) {
+			if (record.targetFormID == targetFormID && record.id > latest) {
+				latest = record.id;
+			}
+		}
+		return latest;
+	}
+
+	[[nodiscard]] bool IsImpactForTarget(std::monostate, std::int32_t a_impactID, RE::TESObjectREFR* a_target)
+	{
+		const auto record = FindImpactRecord(a_impactID);
+		return record && a_target && record->targetFormID == FormIDOf(a_target);
+	}
+
+	[[nodiscard]] bool IsImpactActorSkin(std::monostate, std::int32_t a_impactID)
+	{
+		const auto record = FindImpactRecord(a_impactID);
+		return record ? record->actorSkin : false;
+	}
+
+	[[nodiscard]] std::string GetImpactNode(std::monostate, std::int32_t a_impactID)
+	{
+		const auto record = FindImpactRecord(a_impactID);
+		return record ? record->node : "";
+	}
+
+	[[nodiscard]] std::string GetImpactAlternateNode(std::monostate, std::int32_t a_impactID)
+	{
+		const auto record = FindImpactRecord(a_impactID);
+		return record ? record->alternateNode : "";
+	}
+
+	[[nodiscard]] std::string GetImpactConfidence(std::monostate, std::int32_t a_impactID)
+	{
+		const auto record = FindImpactRecord(a_impactID);
+		return record ? record->confidence : "";
+	}
+
+	[[nodiscard]] std::int32_t GetImpactLimb(std::monostate, std::int32_t a_impactID)
+	{
+		const auto record = FindImpactRecord(a_impactID);
+		return record ? record->damageLimb : -1;
+	}
+
+	[[nodiscard]] std::int32_t GetImpactMaterialFormID(std::monostate, std::int32_t a_impactID)
+	{
+		const auto record = FindImpactRecord(a_impactID);
+		return record ? static_cast<std::int32_t>(record->materialFormID) : 0;
+	}
+
+	[[nodiscard]] float GetImpactPositionX(std::monostate, std::int32_t a_impactID)
+	{
+		const auto record = FindImpactRecord(a_impactID);
+		return record ? record->position.x : 0.0f;
+	}
+
+	[[nodiscard]] float GetImpactPositionY(std::monostate, std::int32_t a_impactID)
+	{
+		const auto record = FindImpactRecord(a_impactID);
+		return record ? record->position.y : 0.0f;
+	}
+
+	[[nodiscard]] float GetImpactPositionZ(std::monostate, std::int32_t a_impactID)
+	{
+		const auto record = FindImpactRecord(a_impactID);
+		return record ? record->position.z : 0.0f;
+	}
+
+	[[nodiscard]] float GetImpactNormalX(std::monostate, std::int32_t a_impactID)
+	{
+		const auto record = FindImpactRecord(a_impactID);
+		return record ? record->normal.x : 0.0f;
+	}
+
+	[[nodiscard]] float GetImpactNormalY(std::monostate, std::int32_t a_impactID)
+	{
+		const auto record = FindImpactRecord(a_impactID);
+		return record ? record->normal.y : 0.0f;
+	}
+
+	[[nodiscard]] float GetImpactNormalZ(std::monostate, std::int32_t a_impactID)
+	{
+		const auto record = FindImpactRecord(a_impactID);
+		return record ? record->normal.z : 0.0f;
+	}
+
+	std::vector<std::unique_ptr<RE::BSScript::IFunction>> g_impactNativeFunctions;
+
+	template <class Fn>
+	bool BindImpactNative(RE::BSScript::IVirtualMachine& a_vm, std::string_view a_name, Fn a_fn)
+	{
+		std::unique_ptr<RE::BSScript::IFunction> function{
+			new RE::BSScript::NativeFunction(
+			"simultaneousinputimpact",
+			a_name,
+			a_fn,
+			false)
+		};
+		auto* rawFunction = function.get();
+		if (!a_vm.BindNativeMethod(rawFunction)) {
+			REX::ERROR("Papyrus impact native bind failed: {}", a_name);
+			return false;
+		}
+
+		g_impactNativeFunctions.push_back(std::move(function));
+		return true;
+	}
+
+	void RegisterImpactPapyrusFunctions()
+	{
+		auto* gameVM = RE::GameVM::GetSingleton();
+		auto* vm = gameVM ? gameVM->GetVM() : nullptr;
+		if (!vm) {
+			REX::ERROR("Papyrus impact native registration failed: GameVM/VM unavailable");
+			++g_hooksSkipped;
+			return;
+		}
+
+		bool ok = true;
+		ok = BindImpactNative(*vm, "GetLatestImpactId", GetLatestImpactIdForTarget) && ok;
+		ok = BindImpactNative(*vm, "GetLatestAnyImpactId", GetLatestAnyImpactIdForTarget) && ok;
+		ok = BindImpactNative(*vm, "IsImpactForTarget", IsImpactForTarget) && ok;
+		ok = BindImpactNative(*vm, "IsImpactActorSkin", IsImpactActorSkin) && ok;
+		ok = BindImpactNative(*vm, "GetImpactNode", GetImpactNode) && ok;
+		ok = BindImpactNative(*vm, "GetImpactAlternateNode", GetImpactAlternateNode) && ok;
+		ok = BindImpactNative(*vm, "GetImpactConfidence", GetImpactConfidence) && ok;
+		ok = BindImpactNative(*vm, "GetImpactLimb", GetImpactLimb) && ok;
+		ok = BindImpactNative(*vm, "GetImpactMaterialFormID", GetImpactMaterialFormID) && ok;
+		ok = BindImpactNative(*vm, "GetImpactPositionX", GetImpactPositionX) && ok;
+		ok = BindImpactNative(*vm, "GetImpactPositionY", GetImpactPositionY) && ok;
+		ok = BindImpactNative(*vm, "GetImpactPositionZ", GetImpactPositionZ) && ok;
+		ok = BindImpactNative(*vm, "GetImpactNormalX", GetImpactNormalX) && ok;
+		ok = BindImpactNative(*vm, "GetImpactNormalY", GetImpactNormalY) && ok;
+		ok = BindImpactNative(*vm, "GetImpactNormalZ", GetImpactNormalZ) && ok;
+
+		if (ok) {
+			REX::INFO("Papyrus impact natives registered on simultaneousinputimpact");
+			++g_hooksInstalled;
+		} else {
+			++g_hooksSkipped;
+		}
+	}
+
+	[[nodiscard]] const char* FixedStringOrNone(const RE::BSFixedString& a_value)
+	{
+		const auto* value = a_value.c_str();
+		return value && value[0] ? value : "<empty>";
+	}
+
+	[[nodiscard]] const char* FixedStringOrNone(const RE::BSFixedStringCS& a_value)
+	{
+		const auto* value = a_value.c_str();
+		return value && value[0] ? value : "<empty>";
+	}
+
+	[[nodiscard]] RE::Actor* TryLookupActorByFormID(std::uint32_t a_formID)
+	{
+		if (a_formID == 0 || a_formID == 0xFFFFFFFF) {
+			return nullptr;
+		}
+
+		if (auto* actor = RE::TESForm::LookupByID<RE::Actor>(a_formID)) {
+			return actor;
+		}
+
+		// Projectile ImpactData stores a TESPointerHandle. For temporary refs,
+		// the observed handle is the low 24 bits of the FFxxxxxx form ID.
+		if ((a_formID & 0xFF000000) == 0) {
+			return RE::TESForm::LookupByID<RE::Actor>(0xFF000000u | a_formID);
+		}
+
+		return nullptr;
+	}
+
+	void LogActorBodyPartRecord(
+		std::uint32_t a_logIndex,
+		const char* a_phase,
+		const char* a_eventName,
+		std::uint32_t a_targetID,
+		std::int32_t a_damageLimb)
+	{
+		constexpr auto kTotalLimbs = static_cast<std::int32_t>(RE::BGSBodyPartDefs::LIMB_ENUM::kTotal);
+		if (a_damageLimb < 0 || a_damageLimb >= kTotalLimbs) {
+			return;
+		}
+
+		auto* actor = TryLookupActorByFormID(a_targetID);
+		if (!actor) {
+			REX::INFO(
+				"impact-bodypart[{}:{}:{}]: targetID={:08X} tempFormID={:08X} damageLimb={}/'{}' actor=<lookup-failed>",
+				a_logIndex,
+				a_phase,
+				a_eventName,
+				a_targetID,
+				0xFF000000u | a_targetID,
+				a_damageLimb,
+				LimbName(a_damageLimb));
+			return;
+		}
+
+		const auto* npc = actor->GetNPC();
+		const auto* race = npc ? npc->GetRace() : nullptr;
+		const auto* bodyPartData = race ? race->bodyPartInfo.unk08 : nullptr;
+		const auto* bodyPart = bodyPartData ? bodyPartData->parts[a_damageLimb] : nullptr;
+		if (!bodyPart) {
+			REX::INFO(
+				"impact-bodypart[{}:{}:{}]: targetID={:08X} tempFormID={:08X} actor={:08X} npc={:08X} race={:08X} bodyPartData={:p} "
+				"damageLimb={}/'{}' part=<missing>",
+				a_logIndex,
+				a_phase,
+				a_eventName,
+				a_targetID,
+				0xFF000000u | a_targetID,
+				FormIDOf(actor),
+				FormIDOf(npc),
+				FormIDOf(race),
+				static_cast<const void*>(bodyPartData),
+				a_damageLimb,
+				LimbName(a_damageLimb));
+			return;
+		}
+
+		REX::INFO(
+			"impact-bodypart[{}:{}:{}]: targetID={:08X} tempFormID={:08X} actor={:08X} npc={:08X} race={:08X} bodyPartData={:p} part={:p} "
+			"damageLimb={}/'{}' partLimb={} flags={:02X} "
+			"hitReaction=(chainStart='{}' chainEnd='{}' variableX='{}' variableY='{}' variableZ='{}') "
+			"strings=(unk70='{}' unk78='{}' unk80='{}' unk88='{}' unk90='{}')",
+			a_logIndex,
+			a_phase,
+			a_eventName,
+			a_targetID,
+			0xFF000000u | a_targetID,
+			FormIDOf(actor),
+			FormIDOf(npc),
+			FormIDOf(race),
+			static_cast<const void*>(bodyPartData),
+			static_cast<const void*>(bodyPart),
+			a_damageLimb,
+			LimbName(a_damageLimb),
+			static_cast<std::int32_t>(bodyPart->limbEnum.underlying()),
+			bodyPart->flags,
+			FixedStringOrNone(bodyPart->hitReactionData.chainStart),
+			FixedStringOrNone(bodyPart->hitReactionData.chainEnd),
+			FixedStringOrNone(bodyPart->hitReactionData.variableX),
+			FixedStringOrNone(bodyPart->hitReactionData.variableY),
+			FixedStringOrNone(bodyPart->hitReactionData.variableZ),
+			FixedStringOrNone(bodyPart->unk70),
+			FixedStringOrNone(bodyPart->unk78),
+			FixedStringOrNone(bodyPart->unk80),
+			FixedStringOrNone(bodyPart->unk88),
+			FixedStringOrNone(bodyPart->unk90));
+	}
+
+	RuntimeImpactTraceState& GetRuntimeImpactTraceState(RE::Projectile* a_projectile, const RE::Projectile::ImpactData* a_impact)
+	{
+		const auto projectile = reinterpret_cast<std::uintptr_t>(a_projectile);
+		const auto impactData = reinterpret_cast<std::uintptr_t>(a_impact);
+		const auto formID = FormIDOf(a_projectile);
+
+		for (auto& state : g_runtimeImpactTraceStates) {
+			if (state.projectile == projectile && state.impactData == impactData && state.projectileFormID == formID) {
+				return state;
+			}
+		}
+
+		auto& state = g_runtimeImpactTraceStates[g_runtimeImpactTraceCursor++ % g_runtimeImpactTraceStates.size()];
+		state = RuntimeImpactTraceState{
+			.projectile = projectile,
+			.impactData = impactData,
+			.projectileFormID = formID
+		};
+		return state;
+	}
+
+	ProjectileVirtualTraceHook* FindProjectileVirtualTraceHook(RE::Projectile* a_projectile)
+	{
+		if (!a_projectile) {
+			return nullptr;
+		}
+
+		const auto vtable = *reinterpret_cast<std::uintptr_t*>(a_projectile);
+		for (auto& hook : g_projectileVirtualTraceHooks) {
+			if (hook.vtable == vtable) {
+				return std::addressof(hook);
+			}
+		}
+		return nullptr;
+	}
+
+	ProjectileUpdateTraceHook* FindProjectileUpdateTraceHook(RE::Projectile* a_projectile)
+	{
+		if (!a_projectile) {
+			return nullptr;
+		}
+
+		const auto vtable = *reinterpret_cast<std::uintptr_t*>(a_projectile);
+		for (auto& hook : g_projectileUpdateTraceHooks) {
+			if (hook.vtable == vtable) {
+				return std::addressof(hook);
+			}
+		}
+		return nullptr;
+	}
+
+	void LogProjectileImpact(RE::Projectile* a_projectile, const RE::Projectile::ImpactData* a_impact)
+	{
+		if (!a_projectile || !a_impact) {
+			return;
+		}
+
+		const auto logIndex = g_projectileImpactLogCount.fetch_add(1, std::memory_order_relaxed);
+		if (logIndex >= kProjectileImpactLogLimit) {
+			if (logIndex == kProjectileImpactLogLimit) {
+				REX::INFO("impact-log: reached {} entries; suppressing further per-impact logs", kProjectileImpactLogLimit);
+			}
+			return;
+		}
+
+		const auto* material = a_impact->materialType;
+		const auto* limbObj = a_projectile->targetLimbObj.get();
+		const auto damageLimb = static_cast<std::int32_t>(a_impact->damageLimb.underlying());
+		const auto* colObj = a_impact->colObj.get();
+		std::uintptr_t collisionIdA = 0xFFFFFFFFFFFFFFFFull;
+		std::uintptr_t collisionIdB = 0xFFFFFFFFFFFFFFFFull;
+		if (colObj) {
+			[[maybe_unused]] const auto readCollisionIdA = TryReadQword(colObj, 0x28, collisionIdA);
+			[[maybe_unused]] const auto readCollisionIdB = TryReadQword(colObj, 0x58, collisionIdB);
+		}
+		const auto nodeGuess = GuessPapyrusNode(damageLimb, collisionIdA, collisionIdB);
+
+		REX::INFO(
+			"impact-log[{}]: projectile={:08X} shooterHandle={:08X} "
+			"targetHandle={:08X} weapon={:08X} ammo={:08X} "
+			"pos=({:.3f},{:.3f},{:.3f}) normal=({:.3f},{:.3f},{:.3f}) "
+			"material={:08X}/'{}' damageLimb={}/'{}' collisionLayer={} resultOverride={} shapeKey={:08X} "
+			"papyrusNode='{}' alternateNode='{}' nodeConfidence='{}' colIDs={:#x}/{:#x} "
+			"decalSize={:.3f} targetWorldObject={}/{} processed={} spellCast={} effectSpawned={} backFace={} "
+			"targetLimbObj={:p} impactPtr={:p} colObj={:p}",
+			logIndex,
+			FormIDOf(a_projectile),
+			a_projectile->shooterHandle,
+			a_impact->collidee,
+			FormIDOf(a_projectile->weaponSource.object),
+			FormIDOf(a_projectile->ammoSource),
+			a_impact->location.position.x,
+			a_impact->location.position.y,
+			a_impact->location.position.z,
+			a_impact->normal.x,
+			a_impact->normal.y,
+			a_impact->normal.z,
+			FormIDOf(material),
+			material ? material->materialName.c_str() : "<none>",
+			damageLimb,
+			LimbName(damageLimb),
+			static_cast<std::int32_t>(a_impact->collisionLayer.underlying()),
+			static_cast<std::int32_t>(a_impact->resultOverride.underlying()),
+			a_impact->collisionShapeKey,
+			nodeGuess.primary,
+			nodeGuess.alternate,
+			nodeGuess.confidence,
+			collisionIdA,
+			collisionIdB,
+			a_impact->decalSize,
+			a_impact->targetWorldObjectIndex,
+			a_impact->targetWorldObjectCount,
+			a_impact->processed,
+			a_impact->spellCast,
+			a_impact->effectSpawned,
+			a_impact->backFace,
+			static_cast<const void*>(limbObj),
+			static_cast<const void*>(a_impact),
+			static_cast<const void*>(colObj));
+
+		LogActorBodyPartRecord(logIndex, "impact-hook", "direct", a_impact->collidee, damageLimb);
+	}
+
+	void LogRuntimeProjectileImpactArray(RE::Projectile* a_projectile, const char* a_phase)
+	{
+		if (!a_projectile) {
+			return;
+		}
+
+		const auto base = reinterpret_cast<std::uintptr_t>(a_projectile);
+		const auto count = *reinterpret_cast<const std::uint32_t*>(base + 0xD8);
+		const auto* data = *reinterpret_cast<RE::Projectile::ImpactData* const*>(base + 0xE0);
+		if (count == 0 || !data) {
+			return;
+		}
+
+		const auto& impact = data[0];
+		const auto* material = impact.materialType;
+		const auto* limbObj = *reinterpret_cast<RE::NiAVObject* const*>(base + 0x1E0);
+		auto& state = GetRuntimeImpactTraceState(a_projectile, std::addressof(impact));
+
+		const auto firstSeen = !state.seenInitial;
+		const auto processedTransition = impact.processed && !state.seenProcessed;
+		const auto effectSpawnedTransition = impact.effectSpawned && !state.seenEffectSpawned;
+		if (!firstSeen && !processedTransition && !effectSpawnedTransition) {
+			return;
+		}
+
+		const auto* eventName = firstSeen ? "first-seen" : (processedTransition ? "processed" : "effect-spawned");
+		state.seenInitial = true;
+		if (processedTransition) {
+			++state.processedTransitions;
+		}
+		state.seenProcessed = state.seenProcessed || impact.processed;
+		state.seenEffectSpawned = state.seenEffectSpawned || impact.effectSpawned;
+
+		const auto damageLimb = static_cast<std::int32_t>(impact.damageLimb.underlying());
+		const auto* colObj = impact.colObj.get();
+		std::uintptr_t collisionIdA = 0xFFFFFFFFFFFFFFFFull;
+		std::uintptr_t collisionIdB = 0xFFFFFFFFFFFFFFFFull;
+		if (colObj) {
+			[[maybe_unused]] const auto readCollisionIdA = TryReadQword(colObj, 0x28, collisionIdA);
+			[[maybe_unused]] const auto readCollisionIdB = TryReadQword(colObj, 0x58, collisionIdB);
+		}
+		const auto nodeGuess = GuessPapyrusNode(damageLimb, collisionIdA, collisionIdB);
+		const auto logIndex = g_projectileImpactLogCount.fetch_add(1, std::memory_order_relaxed);
+		if (logIndex >= kProjectileImpactLogLimit) {
+			if (logIndex == kProjectileImpactLogLimit) {
+				REX::INFO("impact-log: reached {} entries; suppressing further per-impact logs", kProjectileImpactLogLimit);
+			}
+			return;
+		}
+
+		REX::INFO(
+			"impact-array[{}:{}:{}]: projectile={:08X} shooterHandle={:08X} count={} data={:p} "
+			"targetHandle={:08X} weapon={:08X} ammo={:08X} "
+			"pos=({:.3f},{:.3f},{:.3f}) normal=({:.3f},{:.3f},{:.3f}) "
+			"material={:08X}/'{}' damageLimb={}/'{}' collisionLayer={} resultOverride={} shapeKey={:08X} "
+			"papyrusNode='{}' alternateNode='{}' nodeConfidence='{}' colIDs={:#x}/{:#x} "
+			"decalSize={:.3f} targetWorldObject={}/{} processed={} spellCast={} effectSpawned={} backFace={} "
+			"targetLimbObj={:p} colObj={:p} processedTransitions={}",
+			logIndex,
+			a_phase,
+			eventName,
+			FormIDOf(a_projectile),
+			*reinterpret_cast<const std::uint32_t*>(base + 0x180),
+			count,
+			static_cast<const void*>(data),
+			impact.collidee,
+			FormIDOf(a_projectile->weaponSource.object),
+			FormIDOf(a_projectile->ammoSource),
+			impact.location.position.x,
+			impact.location.position.y,
+			impact.location.position.z,
+			impact.normal.x,
+			impact.normal.y,
+			impact.normal.z,
+			FormIDOf(material),
+			material ? material->materialName.c_str() : "<none>",
+			damageLimb,
+			LimbName(damageLimb),
+			static_cast<std::int32_t>(impact.collisionLayer.underlying()),
+			static_cast<std::int32_t>(impact.resultOverride.underlying()),
+			impact.collisionShapeKey,
+			nodeGuess.primary,
+			nodeGuess.alternate,
+			nodeGuess.confidence,
+			collisionIdA,
+			collisionIdB,
+			impact.decalSize,
+			impact.targetWorldObjectIndex,
+			impact.targetWorldObjectCount,
+			impact.processed,
+			impact.spellCast,
+			impact.effectSpawned,
+			impact.backFace,
+			static_cast<const void*>(limbObj),
+			static_cast<const void*>(colObj),
+			state.processedTransitions);
+
+		if (firstSeen) {
+			StoreImpactRecord(a_projectile, impact, damageLimb, collisionIdA, collisionIdB, nodeGuess);
+		}
+
+		LogActorBodyPartRecord(logIndex, a_phase, eventName, impact.collidee, damageLimb);
+
+		if (colObj) {
+			const auto colVtable = ReadQword(colObj, 0x00);
+			const auto bodyA = ReadQword(colObj, 0x10);
+			const auto bodyB = ReadQword(colObj, 0x40);
+			REX::INFO(
+				"impact-colobj[{}:{}:{}]: projectile={:08X} colObj={:p} vtable={:#x} vtableRVA={:#x} "
+				"q08={:#x} q10={:#x} q18={:#x} q20={:#x} q28={:#x} q30={:#x} q38={:#x} q40={:#x} "
+				"q48={:#x} q50={:#x} q58={:#x}",
+				logIndex,
+				a_phase,
+				eventName,
+				FormIDOf(a_projectile),
+				static_cast<const void*>(colObj),
+				colVtable,
+				RvaOf(colVtable),
+				ReadQword(colObj, 0x08),
+				bodyA,
+				ReadQword(colObj, 0x18),
+				ReadQword(colObj, 0x20),
+				ReadQword(colObj, 0x28),
+				ReadQword(colObj, 0x30),
+				ReadQword(colObj, 0x38),
+				bodyB,
+				ReadQword(colObj, 0x48),
+				ReadQword(colObj, 0x50),
+				ReadQword(colObj, 0x58));
+			LogCollisionBodyRecord(logIndex, a_phase, eventName, "q10", reinterpret_cast<const void*>(bodyA));
+			LogCollisionBodyRecord(logIndex, a_phase, eventName, "q40", reinterpret_cast<const void*>(bodyB));
+		}
+	}
+
+	void ProcessProjectileImpactEffectHook(RE::Projectile* a_projectile, RE::Projectile::ImpactData* a_impact)
+	{
+		LogProjectileImpact(a_projectile, a_impact);
+
+		if (g_processProjectileImpactEffect) {
+			g_processProjectileImpactEffect(a_projectile, a_impact);
+		}
+	}
+
+	void MissileProjectileUpdateHook(RE::Projectile* a_projectile, float a_delta)
+	{
+		LogRuntimeProjectileImpactArray(a_projectile, "pre-update");
+		if (g_missileProjectileUpdate) {
+			g_missileProjectileUpdate(a_projectile, a_delta);
+		}
+		LogRuntimeProjectileImpactArray(a_projectile, "post-update");
+	}
+
+	void RuntimeProjectileUpdateHook(RE::Projectile* a_projectile, float a_delta)
+	{
+		auto* hook = FindProjectileUpdateTraceHook(a_projectile);
+		const auto* hookName = hook ? hook->name : "unknown-update-vtable";
+		LogRuntimeProjectileImpactArray(a_projectile, hookName);
+		if (hook && hook->original) {
+			hook->original(a_projectile, a_delta);
+		}
+		LogRuntimeProjectileImpactArray(a_projectile, hookName);
+	}
+
+	void LogRuntimeImpactProcessProbe(RE::Projectile* a_projectile, const char* a_phase, bool a_flag, bool a_result)
+	{
+		if (!a_projectile) {
+			return;
+		}
+
+		const auto logIndex = g_runtimeImpactProcessTraceCount.fetch_add(1, std::memory_order_relaxed);
+		if (logIndex >= 128) {
+			if (logIndex == 128) {
+				REX::INFO("runtime-impact-process: reached 128 entries; suppressing further probe logs");
+			}
+			return;
+		}
+
+		const auto base = reinterpret_cast<std::uintptr_t>(a_projectile);
+		const auto count = *reinterpret_cast<const std::uint32_t*>(base + 0xD8);
+		const auto* data = *reinterpret_cast<const std::byte* const*>(base + 0xE0);
+		const auto processed = data ? static_cast<unsigned>(data[0x6C]) : 0xFFu;
+
+		REX::INFO(
+			"runtime-impact-process[{}:{}]: projectile={:08X} this={:p} vtable={:#x} flag={} result={} "
+			"weapon={:08X} ammo={:08X} count={} data={:p} firstProcessed={}",
+			logIndex,
+			a_phase,
+			FormIDOf(a_projectile),
+			static_cast<const void*>(a_projectile),
+			*reinterpret_cast<const std::uintptr_t*>(a_projectile),
+			a_flag,
+			a_result,
+			FormIDOf(a_projectile->weaponSource.object),
+			FormIDOf(a_projectile->ammoSource),
+			count,
+			static_cast<const void*>(data),
+			processed);
+	}
+
+	bool RuntimeImpactProcessHook(RE::Projectile* a_projectile, bool a_flag)
+	{
+		const auto result = g_runtimeImpactProcess ? g_runtimeImpactProcess(a_projectile, a_flag) : false;
+
+		LogRuntimeImpactProcessProbe(a_projectile, "post", a_flag, result);
+		LogRuntimeProjectileImpactArray(a_projectile, "runtime-post");
+		return result;
+	}
+
+	std::uintptr_t ProjectileVirtualTraceHookFn(RE::Projectile* a_projectile, void* a_arg)
+	{
+		auto* hook = FindProjectileVirtualTraceHook(a_projectile);
+		auto* original = hook ? hook->original : g_projectileVirtualTraceHooks.front().original;
+
+		const auto logIndex = g_projectileVirtualTraceLogCount.fetch_add(1, std::memory_order_relaxed);
+		if (logIndex < 64 && a_projectile) {
+			const auto base = reinterpret_cast<std::uintptr_t>(a_projectile);
+			const auto* limbObj = *reinterpret_cast<RE::NiAVObject* const*>(base + 0x1E0);
+			REX::INFO(
+				"projectile-vslot[{}]: class={} projectile={:08X} this={:p} arg={:p} "
+				"vtable={:#x} "
+				"shooterHandle={:08X} weapon={:08X} ammo={:08X} "
+				"d8={:08X} e0={:p} e8={:p} f0={:p} targetLimbObj={:p}/'{}'",
+				logIndex,
+				hook ? hook->name : "<unknown>",
+				FormIDOf(a_projectile),
+				static_cast<const void*>(a_projectile),
+				a_arg,
+				*reinterpret_cast<const std::uintptr_t*>(a_projectile),
+				*reinterpret_cast<const std::uint32_t*>(base + 0x180),
+				FormIDOf(a_projectile->weaponSource.object),
+				FormIDOf(a_projectile->ammoSource),
+				*reinterpret_cast<const std::uint32_t*>(base + 0xD8),
+				*reinterpret_cast<void* const*>(base + 0xE0),
+				*reinterpret_cast<void* const*>(base + 0xE8),
+				*reinterpret_cast<void* const*>(base + 0xF0),
+				static_cast<const void*>(limbObj),
+				NameOf(limbObj));
+		}
+
+		if (!original) {
+			return 0;
+		}
+		return original(a_projectile, a_arg);
+	}
+
+	class HitEventTraceSink final : public RE::BSTEventSink<HitTraceTESHitEvent>
+	{
+	public:
+		RE::BSEventNotifyControl ProcessEvent(const HitTraceTESHitEvent& a_event, RE::BSTEventSource<HitTraceTESHitEvent>*) override
+		{
+			const auto logIndex = g_hitEventLogCount.fetch_add(1, std::memory_order_relaxed);
+			if (logIndex >= 256) {
+				if (logIndex == 256) {
+					REX::INFO("hit-event: reached 256 entries; suppressing further TESHitEvent logs");
+				}
+				return RE::BSEventNotifyControl::kContinue;
+			}
+
+			const auto& hit = a_event.hitData;
+			const auto& impact = hit.impactData;
+			const auto damageLimb = static_cast<std::int32_t>(hit.damageLimb.underlying());
+			const auto* colObj = impact.colObj.get();
+
+			REX::INFO(
+				"hit-event[{}]: usesHitData={} targetRef={:08X} causeRef={:08X} material='{}' "
+				"sourceForm={:08X} projectileForm={:08X} aggressorHandle={:08X} targetHandle={:08X} "
+				"sourceRefHandle={:08X} weapon={:08X} ammo={:08X} damageLimb={}/'{}' "
+				"pos=({:.3f},{:.3f},{:.3f}) normal=({:.3f},{:.3f},{:.3f}) velocity=({:.3f},{:.3f},{:.3f}) colObj={:p}",
+				logIndex,
+				a_event.usesHitData,
+				FormIDOf(a_event.target.get()),
+				FormIDOf(a_event.cause.get()),
+				a_event.material.c_str(),
+				a_event.sourceFormID,
+				a_event.projectileFormID,
+				HandleValue(hit.aggressor),
+				HandleValue(hit.target),
+				HandleValue(hit.sourceRef),
+				FormIDOf(hit.weapon),
+				FormIDOf(hit.ammo),
+				damageLimb,
+				LimbName(damageLimb),
+				impact.location.x,
+				impact.location.y,
+				impact.location.z,
+				impact.normal.x,
+				impact.normal.y,
+				impact.normal.z,
+				impact.velocity.x,
+				impact.velocity.y,
+				impact.velocity.z,
+				static_cast<const void*>(colObj));
+
+			if (colObj) {
+				const auto colVtable = ReadQword(colObj, 0x00);
+				REX::INFO(
+					"hit-event-colobj[{}]: colObj={:p} vtable={:#x} vtableRVA={:#x} "
+					"q08={:#x} q10={:#x} q18={:#x} q20={:#x} q28={:#x} q30={:#x} q38={:#x} q40={:#x} "
+					"q48={:#x} q50={:#x} q58={:#x}",
+					logIndex,
+					static_cast<const void*>(colObj),
+					colVtable,
+					RvaOf(colVtable),
+					ReadQword(colObj, 0x08),
+					ReadQword(colObj, 0x10),
+					ReadQword(colObj, 0x18),
+					ReadQword(colObj, 0x20),
+					ReadQword(colObj, 0x28),
+					ReadQword(colObj, 0x30),
+					ReadQword(colObj, 0x38),
+					ReadQword(colObj, 0x40),
+					ReadQword(colObj, 0x48),
+					ReadQword(colObj, 0x50),
+					ReadQword(colObj, 0x58));
+			}
+
+			return RE::BSEventNotifyControl::kContinue;
+		}
+	};
+
+	HitEventTraceSink g_hitEventTraceSink;
+
+	void RegisterHitEventTraceSink()
+	{
+		using GetEventSource_t = RE::BSTEventSource<HitTraceTESHitEvent>*();
+		REL::Relocation<GetEventSource_t*> getEventSource{ kTESHitEventGetEventSourceID };
+		if (auto* source = getEventSource()) {
+			source->RegisterSink(std::addressof(g_hitEventTraceSink));
+			REX::INFO("TESHitEvent trace sink registered");
+			++g_hooksInstalled;
+		} else {
+			REX::ERROR("TESHitEvent trace sink registration failed: event source is null");
+			++g_hooksSkipped;
+		}
+	}
+
+	void InstallProjectileImpactHooks()
+	{
+		for (auto& hook : g_projectileUpdateTraceHooks) {
+			try {
+				REL::Relocation<std::uintptr_t> vtbl{ REL::Offset(hook.vtableRVA) };
+				hook.vtable = vtbl.address();
+				const auto original = *reinterpret_cast<std::uintptr_t*>(hook.vtable + (kRuntimeProjectileUpdateSlot * sizeof(void*)));
+				hook.original = reinterpret_cast<MissileProjectileUpdate_t*>(
+					vtbl.write_vfunc(kRuntimeProjectileUpdateSlot, RuntimeProjectileUpdateHook));
+				REX::INFO(
+					"projectile update trace installed: {} slot {:#x} (vtable rva {:#x}, original rva {:#x})",
+					hook.name,
+					kRuntimeProjectileUpdateSlot,
+					hook.vtableRVA,
+					RvaOf(original));
+				++g_hooksInstalled;
+			} catch (const std::exception& ex) {
+				REX::ERROR("{} update trace hook failed: {}", hook.name, ex.what());
+				++g_hooksSkipped;
+			}
+		}
+	}
 }
 
 extern "C" DLLEXPORT constinit auto SFSEPlugin_Version = []() {
@@ -948,8 +2174,8 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	// branch pool, falling back to a self-allocated trampoline.
 	//
 	// Trampoline budget: each call replacement consumes branch-pool space.
-	// 96 bytes covers the four trigger helper calls and two cursor calls with
-	// margin. The 1.8.86-era
+	// 160 bytes covers the four trigger helper calls, two cursor calls, and
+	// the temporary projectile trace hooks with margin. The 1.8.86-era
 	// Run_WindowsMessageLoop hook is no longer attempted because the
 	// underlying predicate call was refactored out of the message pump in
 	// 1.16.236; see MAINTAINING.md section 7. Bump this if we add hooks. We
@@ -961,7 +2187,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	// get one consolidated log folder.
 	SFSE::Init(a_sfse, SFSE::InitInfo{
 		.trampoline = true,
-		.trampolineSize = 96,
+		.trampolineSize = 160,
 	});
 	LogRuntimeProbe(a_sfse);
 
@@ -978,6 +2204,32 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	// look-sensitivity decision (the maintainer's predicate-replacement
 	// hooks target a refcount Release function, not a predicate).
 	InitGamepadActiveFlag();
+
+	// First milestone for the hit-location work: trace the native projectile
+	// impact effect/decal path while the runtime ImpactData record is still
+	// live. This keeps raw NiAVObject pointers frame-local and copies only
+	// IDs/names into the log for validation.
+	InstallProjectileImpactHooks();
+
+	// Defer Papyrus native registration to kPostDataLoad — at SFSEPlugin_Load
+	// time the GameVM singleton is still null, so RegisterImpactPapyrusFunctions
+	// must run after the engine has finished bringing the VM up. Confirmed in
+	// Starfield 1.16.236: registering at load time produces
+	// "Papyrus impact native registration failed: GameVM/VM unavailable" and
+	// no natives bind. kPostDataLoad fires after data files load and the VM
+	// has bound vanilla scripts, which is the right window to add ours.
+	if (auto* messaging = SFSE::GetMessagingInterface()) {
+		messaging->RegisterListener([](SFSE::MessagingInterface::Message* a_msg) {
+			if (a_msg && a_msg->type == SFSE::MessagingInterface::kPostDataLoad) {
+				REX::INFO("SFSE message kPostDataLoad received; registering Papyrus impact natives");
+				RegisterImpactPapyrusFunctions();
+			}
+		});
+		REX::INFO("Papyrus impact native registration deferred to kPostDataLoad");
+	} else {
+		REX::ERROR("SFSE messaging interface unavailable; falling back to immediate native registration (will likely fail)");
+		RegisterImpactPapyrusFunctions();
+	}
 
 	// === Vtable shim: split look input by event type ===
 	// LookHandler vtable slot 1 is the per-event handler. We replace it with a
