@@ -21,6 +21,7 @@
 #include "RE/B/BGSBodyPartDefs.h"
 #include "RE/B/BGSMaterialType.h"
 #include "RE/G/GameVM.h"
+#include "RE/IDs_VTABLE.h"
 #include "RE/N/NiAVObject.h"
 #include "RE/N/NiPoint.h"
 #include "RE/P/Projectile.h"
@@ -239,8 +240,11 @@ namespace
 	constexpr std::uint32_t kProjectileImpactLogLimit = 512;
 	constexpr std::size_t kProjectileVirtualTraceSlot = 0x156;
 	constexpr std::size_t kRuntimeProjectileUpdateSlot = 0x13A;
-	constexpr bool kEnableHitImpactHooks = true;
-	constexpr bool kEnableImpactPapyrusNatives = true;
+	constexpr bool kEnableHitImpactHooks = false;
+	constexpr bool kEnableImpactPapyrusNatives = false;
+	constexpr bool kEnableGlyphDataModelHooks = false;
+	constexpr bool kEnableGamepadActiveBytePatch = true;
+	constexpr bool kEnableTriggerHelperHooks = true;
 
 	ProcessProjectileImpactEffect_t* g_processProjectileImpactEffect = nullptr;
 	MissileProjectileUpdate_t* g_missileProjectileUpdate = nullptr;
@@ -1516,7 +1520,7 @@ bool IsUsingGamepad(RE::BSInputDeviceManager* a_inputDeviceManager)
 // trigger clears and mouse-look clears are visible immediately everywhere.
 static std::atomic_bool UsingThumbstickLook{ false };
 
-// The engine has a global byte at RVA 0x5F67820 in Starfield 1.16.236 that
+// The engine has a global byte at RVA 0x5F679E0 in Starfield 1.16.242 that
 // many code paths inline-check to decide "is gamepad the active input mode."
 // (Verified via IDA xref scan — 145 read sites across the binary, including
 // inside the original LookHandler::CanHandle implementation we replaced.)
@@ -1526,7 +1530,7 @@ static std::atomic_bool UsingThumbstickLook{ false };
 // the deriver tool mis-identified the predicate function (the 4 hooked sites
 // actually call BSStringPool::Entry::Release, a refcount cleanup, not a
 // predicate). The predicate has been INLINED into all 145 callers as a direct
-// `cmp cs:byte_145F67820, 0` — there's no single function to hook.
+// `cmp cs:byte_145F679E0, 0` — there's no single function to hook.
 //
 // Workaround: mirror the UsingThumbstickLook latch into this byte from the
 // vtable shim. Every inlined check then reads our intended state for the
@@ -1534,10 +1538,10 @@ static std::atomic_bool UsingThumbstickLook{ false };
 // without needing to find each inlined check.
 static std::atomic<std::uint8_t*> g_gamepadActiveFlag{ nullptr };
 
-static constexpr std::uintptr_t kGamepadActiveFlagRVA = 0x5F67820;
+static constexpr std::uintptr_t kGamepadActiveFlagRVA = 0x5F679E0;
 static constexpr DWORD kPageReadWrite = 0x04;
 
-// Resolve byte_145F67820's runtime address and make its page writable.
+// Resolve byte_145F679E0's runtime address and make its page writable.
 // Idempotent — call once during SFSEPlugin_Load.
 static void InitGamepadActiveFlag()
 {
@@ -1553,7 +1557,7 @@ static void InitGamepadActiveFlag()
 		*addr = 0;
 		UsingThumbstickLook.store(false, std::memory_order_relaxed);
 		g_gamepadActiveFlag.store(addr, std::memory_order_relaxed);
-		REX::INFO("gamepad-flag mirror: byte_145F67820 at {:p} now writable and initialized to 0 (was prot=0x{:X})",
+		REX::INFO("gamepad-flag mirror: byte_145F679E0 at {:p} now writable and initialized to 0 (was prot=0x{:X})",
 			static_cast<void*>(addr), old_prot);
 	} else {
 		REX::WARN("gamepad-flag mirror: VirtualProtect failed for {:p}; skipping",
@@ -1575,7 +1579,7 @@ static void SetGamepadActiveFlag()
 	}
 }
 
-static constexpr std::uintptr_t kInputValueHelperRVA = 0x22FE890;
+static constexpr std::uintptr_t kInputValueHelperRVA = 0x22FEB40;
 using InputValueHelper_t = void(void*, std::uint32_t, float, float, float);
 
 static std::atomic<std::uint32_t> g_triggerActiveClearCount{ 0 };
@@ -1589,13 +1593,11 @@ void TriggerInputValueHelper(void* a_device, std::uint32_t a_id, float a_time, f
 		auto* deviceBytes = static_cast<std::uint8_t*>(a_device);
 		if (deviceBytes[9] == static_cast<std::uint8_t>(RE::InputEvent::DeviceType::kGamepad)) {
 			deviceBytes[8] = 0;
-			UsingThumbstickLook.store(false, std::memory_order_relaxed);
-			ClearGamepadActiveFlag();
 
 			const auto count = g_triggerActiveClearCount.fetch_add(1, std::memory_order_relaxed);
 			if (count < 8) {
 				REX::INFO(
-					"trigger active-device clear: gamepad helper id={} value={:.3f} previous={:.3f}",
+					"trigger device-byte clear: gamepad helper id={} value={:.3f} previous={:.3f}",
 					a_id,
 					a_value,
 					a_previous);
@@ -1621,6 +1623,9 @@ using ControlMapDataModelUpdate_t = void(void*);
 using PlatformDataModelUpdate_t = void(void*);
 using UIValueNotify_t = void(void*, bool);
 
+ControlMapDataModelUpdate_t* g_controlMapDataModelUpdate = nullptr;
+PlatformDataModelUpdate_t* g_platformDataModelUpdate = nullptr;
+
 static std::atomic<std::uint32_t> g_controlMapGlyphLockCount{ 0 };
 static std::atomic<std::uint32_t> g_platformGlyphLockCount{ 0 };
 static constexpr std::uint32_t    kGamepadPlatform = 1;
@@ -1631,6 +1636,11 @@ static constexpr std::uint32_t    kGamepadPlatform = 1;
 // the per-event mirror.
 void ControlMapDataModelUpdateForGlyphLock(void* a_model)
 {
+	const auto original = g_controlMapDataModelUpdate;
+	if (!original) {
+		return;
+	}
+
 	if (g_lockControllerGlyphs.load(std::memory_order_relaxed)) {
 		const auto count = g_controlMapGlyphLockCount.fetch_add(1, std::memory_order_relaxed);
 		if (count < 8) {
@@ -1645,7 +1655,6 @@ void ControlMapDataModelUpdateForGlyphLock(void* a_model)
 			*const_cast<std::uint8_t*>(flag) = 1;
 		}
 
-		REL::Relocation<ControlMapDataModelUpdate_t> original{ REL::Offset(kControlMapDataModelUpdateRVA) };
 		original(a_model);
 
 		if (flag) {
@@ -1654,7 +1663,6 @@ void ControlMapDataModelUpdateForGlyphLock(void* a_model)
 		return;
 	}
 
-	REL::Relocation<ControlMapDataModelUpdate_t> original{ REL::Offset(kControlMapDataModelUpdateRVA) };
 	original(a_model);
 }
 
@@ -1664,7 +1672,11 @@ void ControlMapDataModelUpdateForGlyphLock(void* a_model)
 // with keyboard layout until the process restarts.
 void PlatformDataModelUpdateForGlyphLock(void* a_model)
 {
-	REL::Relocation<PlatformDataModelUpdate_t> original{ REL::Offset(kPlatformDataModelUpdateRVA) };
+	const auto original = g_platformDataModelUpdate;
+	if (!original) {
+		return;
+	}
+
 	original(a_model);
 
 	if (!g_lockControllerGlyphs.load(std::memory_order_relaxed)) {
@@ -2299,7 +2311,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	// final flag state on its first invocation.
 	LoadConfig(a_sfse);
 
-	// Resolve byte_145F67820's runtime address and make its page writable.
+	// Resolve byte_145F679E0's runtime address and make its page writable.
 	// The LookHandler vtable shim mirrors UsingThumbstickLook into this
 	// byte for per-event sensitivity scaling. See the comment on
 	// g_gamepadActiveFlag for why this is the actual fix for the per-event
@@ -2370,54 +2382,15 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 
 				if (event->eventType != RE::InputEvent::EventType::kMouseMove &&
 					event->eventType != RE::InputEvent::EventType::kThumbstick) {
-					if (event->deviceType == RE::InputEvent::DeviceType::kGamepad &&
-						event->eventType == RE::InputEvent::EventType::kButton) {
-						const auto* button = static_cast<const RE::ButtonEvent*>(event);
-						const char* cur = button->strUserEvent.c_str();
-						UsingThumbstickLook.store(false, std::memory_order_relaxed);
-						ClearGamepadActiveFlag();
-						static thread_local const char* s_lastButtonUE = nullptr;
-						static thread_local float s_lastButtonValue = -1.0f;
-						if (cur != s_lastButtonUE || button->value != s_lastButtonValue) {
-							REX::INFO(
-								"shim: cleared look mirror for gamepad button userEvent='{}' value={:.3f} held={:.3f}",
-								cur ? cur : "<null>",
-								button->value,
-								button->heldDownSecs);
-							s_lastButtonUE = cur;
-							s_lastButtonValue = button->value;
-						}
-					}
 					return false;
 				}
 
 				const auto* idevent = static_cast<const RE::IDEvent*>(event);
 				if (idevent->strUserEvent != kLookEvent) {
-					// Analog trigger events are also surfaced as kThumbstick
-					// IDEvents, but they are not camera-look events. If one
-					// arrives while the last real look event was right-stick,
-					// the gamepad sensitivity mirror can stay latched until a
-					// keyboard movement event makes the engine pick KBM again.
-					// Clear the mirror here, but still return false so the
-					// LookHandler does not consume the trigger/button event.
-					if (event->eventType == RE::InputEvent::EventType::kThumbstick) {
-						static thread_local const char* s_lastUE = nullptr;
-						const char* cur = idevent->strUserEvent.c_str();
-						UsingThumbstickLook.store(false, std::memory_order_relaxed);
-						ClearGamepadActiveFlag();
-						if (cur != s_lastUE) {
-							const auto* raw = reinterpret_cast<const std::byte*>(event);
-							const float x = *reinterpret_cast<const float*>(raw + 0x38);
-							const float y = *reinterpret_cast<const float*>(raw + 0x3C);
-							REX::INFO("shim: cleared look mirror for non-Look kThumbstick userEvent='{}' x={:.3f} y={:.3f}",
-								cur ? cur : "<null>", x, y);
-							s_lastUE = cur;
-						}
-					}
 					return false;
 				}
 
-				// DIAG (L2 sensitivity hunt): log writes to byte_145F67820
+				// DIAG (L2 sensitivity hunt): log writes to byte_145F679E0
 				// only on transition. Drop this once L2 fix lands.
 				static thread_local int s_lastWrite = -1;
 
@@ -2470,57 +2443,60 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 
 	// === Direct byte patch: stop sticks from claiming the device ===
 	// Inside BSPCGamepadDevice poll/update paths the engine writes 1 to a byte
-	// indicating "stick moved -> active device is gamepad". On 1.16.236 IDA
+	// indicating "stick moved -> active device is gamepad". On 1.16.242 IDA
 	// shows two paths with two direct writes apiece:
-	//   Poll         +0x51D / +0x5DC
-	//   ExtendedPoll +0x409 / +0x4A8
+	//   Poll         +0x409 / +0x4A8
+	//   ExtendedPoll +0x3CD / +0x48C
 	// We NOP every occurrence so stick polling does not overwrite the
 	// per-event byte mirror maintained by the LookHandler vtable shim.
 	// Pattern: C6 43 08 01  (mov byte ptr [rbx+8], 1)
-	try {
-		constexpr std::size_t kScanLimit = 0x800;
-		std::size_t           patched = 0;
+	if constexpr (kEnableGamepadActiveBytePatch) {
+		try {
+			constexpr std::size_t kScanLimit = 0x800;
+			std::size_t           patched = 0;
 
-		auto patchPollPath = [&](REL::Relocation<std::uintptr_t> head, const char* name) {
-			const std::uint8_t* p = reinterpret_cast<const std::uint8_t*>(head.address());
-			std::size_t pathPatched = 0;
-			for (std::size_t i = 0; i + 4 <= kScanLimit; ++i) {
-				if (p[i] == 0xC6 && p[i + 1] == 0x43 && p[i + 2] == 0x08 && p[i + 3] == 0x01) {
-					REL::Relocation<std::uintptr_t> hook(head.address() + i);
-					hook.write_fill(REL::NOP, 0x4);
-					REX::INFO("byte patch installed: {} +{:#x}", name, i);
-					++pathPatched;
-					i += 3;  // skip past this match
+			auto patchPollPath = [&](REL::Relocation<std::uintptr_t> head, const char* name) {
+				const std::uint8_t* p = reinterpret_cast<const std::uint8_t*>(head.address());
+				std::size_t pathPatched = 0;
+				for (std::size_t i = 0; i + 4 <= kScanLimit; ++i) {
+					if (p[i] == 0xC6 && p[i + 1] == 0x43 && p[i + 2] == 0x08 && p[i + 3] == 0x01) {
+						REL::Relocation<std::uintptr_t> hook(head.address() + i);
+						hook.write_fill(REL::NOP, 0x4);
+						REX::INFO("byte patch installed: {} +{:#x}", name, i);
+						++pathPatched;
+						i += 3;  // skip past this match
+					}
 				}
+				return pathPatched;
+			};
+
+			patched += patchPollPath(
+				REL::Relocation<std::uintptr_t>(RE::Offset::BSPCGamepadDevice::PollBody_1_16_242),
+				"BSPCGamepadDevice::Poll");
+			patched += patchPollPath(
+				REL::Relocation<std::uintptr_t>(RE::Offset::BSPCGamepadDevice::ExtendedPollBody_1_16_242),
+				"BSPCGamepadDevice::ExtendedPoll");
+
+			if (patched > 0) {
+				++g_hooksInstalled;
+				REX::INFO("byte patch summary: NOPed {} gamepad active-device write(s)", patched);
+			} else {
+				REX::WARN(
+					"byte patch skipped: gamepad poll active-device anchor 'C6 43 08 01' "
+					"not found in first {:#x} bytes of Poll rva {:#x} or "
+					"ExtendedPoll rva {:#x}; function may have been refactored further. "
+					"thumbsticks will still device-switch.",
+					kScanLimit,
+					RE::Offset::BSPCGamepadDevice::PollBody_1_16_242.offset(),
+					RE::Offset::BSPCGamepadDevice::ExtendedPollBody_1_16_242.offset());
+				++g_hooksSkipped;
 			}
-			return pathPatched;
-		};
-
-		patched += patchPollPath(
-			REL::Relocation<std::uintptr_t>(RE::Offset::BSPCGamepadDevice::Poll),
-			"BSPCGamepadDevice::Poll");
-		patched += patchPollPath(
-			REL::Relocation<std::uintptr_t>(RE::Offset::BSPCGamepadDevice::ExtendedPoll),
-			"BSPCGamepadDevice::ExtendedPoll");
-
-		if (patched > 0) {
-			++g_hooksInstalled;
-			REX::INFO("byte patch summary: NOPed {} gamepad active-device write(s)", patched);
-		} else {
-			REX::WARN(
-				"byte patch skipped: gamepad poll active-device anchor 'C6 43 08 01' "
-				"not found in first {:#x} bytes of Poll AL id {} (rva {:#x}) or "
-				"ExtendedPoll rva {:#x}; function may have been refactored further. "
-				"thumbsticks will still device-switch.",
-				kScanLimit,
-				RE::Offset::BSPCGamepadDevice::Poll.id(),
-				RE::Offset::BSPCGamepadDevice::Poll.offset(),
-				RE::Offset::BSPCGamepadDevice::ExtendedPoll.offset());
+		} catch (const std::exception& ex) {
+			REX::ERROR("BSPCGamepadDevice::Poll patch failed: {}", ex.what());
 			++g_hooksSkipped;
 		}
-	} catch (const std::exception& ex) {
-		REX::ERROR("BSPCGamepadDevice::Poll patch failed: {}", ex.what());
-		++g_hooksSkipped;
+	} else {
+		REX::INFO("gamepad active-device byte patch disabled for 1.16.242 isolation build");
 	}
 
 	// === Trigger helper call replacements ===
@@ -2528,52 +2504,70 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	// Let the engine create the ButtonEvent normally, then clear only the
 	// gamepad device active byte so SecondaryAttack does not leave mouse look
 	// on the gamepad sensitivity path until a keyboard event arrives.
-	try {
-		REL::Relocation<std::uintptr_t> pollHead(RE::Offset::BSPCGamepadDevice::Poll);
-		REL::Relocation<std::uintptr_t> extendedHead(RE::Offset::BSPCGamepadDevice::ExtendedPoll);
+	if constexpr (kEnableTriggerHelperHooks) {
+		try {
+			REL::Relocation<std::uintptr_t> pollHead(RE::Offset::BSPCGamepadDevice::PollBody_1_16_242);
+			REL::Relocation<std::uintptr_t> extendedHead(RE::Offset::BSPCGamepadDevice::ExtendedPollBody_1_16_242);
 
-		TryWriteCallAt<5>(
-			pollHead.address() + 0x3AC,
-			TriggerInputValueHelper,
-			"BSPCGamepadDevice::Poll LT helper");
-		TryWriteCallAt<5>(
-			pollHead.address() + 0x3DC,
-			TriggerInputValueHelper,
-			"BSPCGamepadDevice::Poll RT helper");
-		TryWriteCallAt<5>(
-			extendedHead.address() + 0x325,
-			TriggerInputValueHelper,
-			"BSPCGamepadDevice::ExtendedPoll LT helper");
-		TryWriteCallAt<5>(
-			extendedHead.address() + 0x34D,
-			TriggerInputValueHelper,
-			"BSPCGamepadDevice::ExtendedPoll RT helper");
-	} catch (const std::exception& ex) {
-		REX::ERROR("trigger helper hook setup failed: {}", ex.what());
-		++g_hooksSkipped;
+			TryWriteCallAt<5>(
+				pollHead.address() + 0x325,
+				TriggerInputValueHelper,
+				"BSPCGamepadDevice::Poll LT helper");
+			TryWriteCallAt<5>(
+				pollHead.address() + 0x34D,
+				TriggerInputValueHelper,
+				"BSPCGamepadDevice::Poll RT helper");
+			TryWriteCallAt<5>(
+				extendedHead.address() + 0x25C,
+				TriggerInputValueHelper,
+				"BSPCGamepadDevice::ExtendedPoll LT helper");
+			TryWriteCallAt<5>(
+				extendedHead.address() + 0x28C,
+				TriggerInputValueHelper,
+				"BSPCGamepadDevice::ExtendedPoll RT helper");
+		} catch (const std::exception& ex) {
+			REX::ERROR("trigger helper hook setup failed: {}", ex.what());
+			++g_hooksSkipped;
+		}
+	} else {
+		REX::INFO("trigger helper hooks disabled for 1.16.242 isolation build");
 	}
 
 	// === UI control-map data replacement ===
 	// ControlMapDataModel::Update publishes PlatformData.uPlatform and the
 	// mapped button events consumed by Starfield's Scaleform menu button bars.
 	// Pin only this UI data model to gamepad when glyph lock is enabled.
-	try {
-		REL::Relocation<std::uintptr_t> vtbl{ REL::Offset(0x4D83688) };
-		vtbl.write_vfunc(1, ControlMapDataModelUpdateForGlyphLock);
-		REX::INFO("vtable shim installed: ControlMapDataModel update slot 1");
-		++g_hooksInstalled;
-	} catch (const std::exception& ex) {
-		REX::ERROR("ControlMapDataModel update hook failed: {}", ex.what());
-		++g_hooksSkipped;
-	}
-	try {
-		REL::Relocation<std::uintptr_t> vtbl{ REL::Offset(0x4D837B0) };
-		vtbl.write_vfunc(1, PlatformDataModelUpdateForGlyphLock);
-		REX::INFO("vtable shim installed: PlatformDataModel update slot 1");
-		++g_hooksInstalled;
-	} catch (const std::exception& ex) {
-		REX::ERROR("PlatformDataModel update hook failed: {}", ex.what());
-		++g_hooksSkipped;
+	if constexpr (kEnableGlyphDataModelHooks) {
+		try {
+			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE::ControlMapDataModel[0] };
+			g_controlMapDataModelUpdate = reinterpret_cast<ControlMapDataModelUpdate_t*>(
+				vtbl.write_vfunc(1, ControlMapDataModelUpdateForGlyphLock));
+			REX::INFO(
+				"vtable shim installed: ControlMapDataModel update slot 1 (AL id {}, rva {:#x}, original rva {:#x})",
+				RE::VTABLE::ControlMapDataModel[0].id(),
+				RvaOf(vtbl.address()),
+				RvaOf(reinterpret_cast<std::uintptr_t>(g_controlMapDataModelUpdate)));
+			++g_hooksInstalled;
+		} catch (const std::exception& ex) {
+			REX::ERROR("ControlMapDataModel update hook failed: {}", ex.what());
+			++g_hooksSkipped;
+		}
+		try {
+			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE::PlatformDataModel[0] };
+			g_platformDataModelUpdate = reinterpret_cast<PlatformDataModelUpdate_t*>(
+				vtbl.write_vfunc(1, PlatformDataModelUpdateForGlyphLock));
+			REX::INFO(
+				"vtable shim installed: PlatformDataModel update slot 1 (AL id {}, rva {:#x}, original rva {:#x})",
+				RE::VTABLE::PlatformDataModel[0].id(),
+				RvaOf(vtbl.address()),
+				RvaOf(reinterpret_cast<std::uintptr_t>(g_platformDataModelUpdate)));
+			++g_hooksInstalled;
+		} catch (const std::exception& ex) {
+			REX::ERROR("PlatformDataModel update hook failed: {}", ex.what());
+			++g_hooksSkipped;
+		}
+	} else {
+		REX::INFO("glyph-lock data model hooks disabled for 1.16.242 isolation build");
 	}
 
 	// === Retired look-input call replacements ===
@@ -2582,7 +2576,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	// (lock cmpxchg/xadd + WakeByAddressAll), not a boolean predicate.
 	// Replacing those calls with IsUsingThumbstickLook skips cleanup and has
 	// no useful return value at the call sites. For look scaling, rely on the
-	// byte_145F67820 event mirror instead and leave those calls untouched.
+	// byte_145F679E0 event mirror instead and leave those calls untouched.
 
 	// === Cursor visibility/style call replacements (-> IsGamepadCursor) ===
 	// Offsets target the cursor-variant predicate (RVA 0x2c4b50, AL 35982);

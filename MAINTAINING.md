@@ -163,6 +163,49 @@ impact is that the OS cursor may be confined to the window whenever a
 controller is plugged in, which is the engine's default and what 1.16.236
 vanilla already does.
 
+## 7.1. Status against Starfield 1.16.242
+
+Starfield 1.16.242 shifted the input poll bodies and the inlined global
+active-device byte used by the LookHandler path. The old 1.16.236 build could
+load, but simultaneous input was broken in ADS: gyro/mouse sensitivity was
+correct while right-stick sensitivity was extremely low. The plugin logs showed
+`WRITE 1` for thumbstick look, but IDA showed the engine was no longer reading
+the byte we were writing.
+
+The relevant 1.16.242 values are:
+
+- `LookHandler` slot 1 still comes from AL ID `433589`, but its original
+  implementation reads `byte_145F679E0`, so the mirror RVA is now `0x5F679E0`
+  instead of the 1.16.236 `0x5F67820`.
+- `BSPCGamepadDevice::PollBody_1_16_242` is RVA `0x2302640`.
+- `BSPCGamepadDevice::ExtendedPollBody_1_16_242` is RVA `0x2302FC0`.
+- Stick-active writes `C6 43 08 01` are at Poll `+0x409` / `+0x4A8` and
+  ExtendedPoll `+0x3CD` / `+0x48C`.
+- The shared input value helper moved from RVA `0x22FE890` to `0x22FEB40`.
+- LT/RT helper call sites are Poll `+0x325` / `+0x34D` and ExtendedPoll
+  `+0x25C` / `+0x28C`.
+
+The important logic is still the same design, but the ownership boundary is
+stricter:
+
+- Real `Look` events own the global active-device mirror. Mouse/gyro Look
+  writes `0`; non-zero thumbstick Look writes `1`; zero thumbstick Look writes
+  `0`.
+- LT/RT helper wrappers clear only `[gamepadDevice + 0x8]` after the original
+  helper runs. They must not clear `UsingThumbstickLook` or the global mirror,
+  because `SecondaryAttack` events can interleave with right-stick Look while
+  ADS is held and force the stick back onto the mouse-scale path.
+- Non-Look gamepad button events and non-Look thumbstick events such as `Move`
+  must not decide look sensitivity. They return false from the LookHandler shim
+  without writing the global mirror.
+
+This was verified in IDA by disassembling the 1.16.242 LookHandler slot-1
+function at `0x1412BCD80`; the key instruction is:
+
+```asm
+1412bcd9f  cmp     cs:byte_145F679E0, 0
+```
+
 ### L2 / SecondaryAttack sensitivity latch
 
 Symptom: after pressing L2 / `SecondaryAttack`, mouse look sensitivity becomes
@@ -196,10 +239,12 @@ the two gamepad poll paths:
 - `BSPCGamepadDevice::ExtendedPoll` LT/RT helper calls at `+0x325` and `+0x34D`
 
 `TriggerInputValueHelper` calls the original helper so `SecondaryAttack` still
-works, then clears `[gamepadDevice + 0x8]`, `UsingThumbstickLook`, and the
-global mirror for trigger IDs 9/10 only. This preserves normal event delivery
-while preventing trigger events from leaving mouse look on the gamepad-active
-sensitivity path.
+works, then clears `[gamepadDevice + 0x8]` for trigger IDs 9/10 only. This
+preserves normal event delivery while preventing trigger events from leaving
+mouse look on the gamepad-active sensitivity path. Do not clear
+`UsingThumbstickLook` or the global mirror from the trigger wrapper on
+1.16.242; real Look events must be the only source of truth for the global
+look-sensitivity mirror.
 
 If a future patch shifts these offsets again, re-run
 `tools/derive_function_ids.py --exe <Starfield.exe> --db <versionlib.bin>`

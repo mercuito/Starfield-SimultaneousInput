@@ -55,6 +55,8 @@ namespace RE
 		{
 			constexpr REL::ID Poll{ 124384 };
 			constexpr REL::Offset ExtendedPoll{ 0x2302390 };
+			constexpr REL::Offset PollBody_1_16_242{ 0x2302640 };
+			constexpr REL::Offset ExtendedPollBody_1_16_242{ 0x2302FC0 };
 		}
 
 		// IMenu::ShowCursor. Original Parapets +0x14 hook redirected the
